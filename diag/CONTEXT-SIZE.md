@@ -30,22 +30,27 @@ Four conditions, each run with the probe above. Values are tokens; `1M` =
 [Error shapes](#error-shapes)). One run predates full error-field capture (see
 the footnote below the table).
 
-| requested id | Pro, credits off | Pro, credits on | Max, credits off | Max, credits on |
-|---|---|---|---|---|
-| `claude-opus-4-8` bare | 200K | 200K | 200K | 200K |
-| `claude-opus-4-8[1m]` | 1M | 1M | 1M | 1M |
-| `claude-opus-4-7` bare | 1M | 1M | 1M | 1M |
-| `claude-opus-4-7[1m]` | 1M | 1M | 1M | 1M |
-| `claude-opus-4-6` bare | 200K | 200K | 200K | 200K |
-| `claude-opus-4-6[1m]` | error 429 | 1M | 1M | 1M |
-| `claude-sonnet-4-6` bare | 200K | 200K | 200K | 200K |
-| `claude-sonnet-4-6[1m]` | error 429 | 1M | error 429 | 1M |
-| `claude-haiku-4-5` bare | 200K | 200K | 200K | 200K |
-| `claude-haiku-4-5[1m]` | error 429† | error 400 | error 400 | error 400 |
+| requested id              | Pro, credits off | Pro, credits on | Max, credits off | Max, credits on |
+|---------------------------|------------------|-----------------|------------------|-----------------|
+| `claude-opus-4-8`         | 200K             | 200K            | 200K             | 200K            |
+| `claude-opus-4-8[1m]`    | 1M               | 1M              | 1M               | 1M              |
+| `claude-opus-4-7`         | 1M               | 1M              | 1M               | 1M              |
+| `claude-opus-4-7[1m]`    | 1M               | 1M              | 1M               | 1M              |
+| `claude-opus-4-6`         | 200K             | 200K            | 200K             | 200K            |
+| `claude-opus-4-6[1m]`    | 429              | 1M              | 1M               | 1M              |
+| `claude-fable-5`          | 200K             | —               | —                | —               |
+| `claude-fable-5[1m]`     | 1M               | —               | —                | —               |
+| `claude-sonnet-5`         | 200K             | —               | —                | —               |
+| `claude-sonnet-5[1m]`    | 1M               | —               | —                | —               |
+| `claude-sonnet-4-6`       | 200K             | 200K            | 200K             | 200K            |
+| `claude-sonnet-4-6[1m]`  | 429              | 1M              | 429              | 1M              |
+| `claude-haiku-4-5`        | 200K             | 200K            | 200K             | 200K            |
+| `claude-haiku-4-5[1m]`   | 429†             | 400             | 400              | 400             |
 
 Raw runs: `.test-output/context-size/{pro,max}-2026-06-26T21-*.json`
 
-Max-credits-on matched Pro-credits-on for every cell (shown for completeness).
+`—` = not yet tested in that condition. Max-credits-on matched Pro-credits-on
+for every cell tested in both (shown for completeness).
 
 † **Inferred, not directly measured.** The Pro-credits-off run predates
 error-field capture; its three rejected `[1m]` rows have no recorded HTTP status
@@ -95,20 +100,11 @@ zero model tokens).
 
 ## Findings
 
-1. **A bare model id is never auto-upgraded to 1M on the SDK path.** Opus 4.8
-   and 4.6 bare serve 200K on every plan/credits combination. (Contrast: the
-   interactive Claude Code CLI auto-selects `[1m]` for Opus on Max/Team/Enterprise.)
-   The `[1m]` suffix is the only reliable way to request 1M via the SDK.
-2. **`opus-4-7` bare serves 1M everywhere** — Pro and Max, credits on or off.
-   Stable across runs. Lone anomaly; unexplained.
-3. **Credit-gating for Opus `[1m]` is version-specific on Pro.** `opus-4-6[1m]`
-   requires Extra Usage credits on Pro (429 without, 1M with); Max includes it.
-   `opus-4-8[1m]` and `opus-4-7[1m]` serve 1M on Pro without credits — not
-   credit-gated for those versions. Unexplained (same vein as finding 2).
-4. **Sonnet `[1m]` is metered on every plan**, Max included — 429 with credits
-   off, 1M with credits on. Matches Anthropic's plan table.
-5. **`[1m]` on a non-1M-capable model is always rejected.** `haiku-4-5[1m]` is
-   429 (credit gate) or 400 (capability) depending on plan/credits.
-6. **The subscription/OAuth path differs from the public API.** Anthropic's docs
+1. **The `[1m]` suffix is the only reliable way to request 1M via the SDK.**
+   Bare model ids serve 200K (except the anomalous `opus-4-7`). The interactive
+   Claude Code CLI auto-selects `[1m]` for Opus on Max/Team/Enterprise, but the
+   SDK does not.
+2. **`opus-4-7` bare serves 1M everywhere** — stable across runs. Unexplained.
+3. **The subscription/OAuth path differs from the public API.** Anthropic's docs
    say Opus 4.8/4.7 default to 1M on the API with no beta header; subscription
    SDK serves 200K for a bare 4.8 id.

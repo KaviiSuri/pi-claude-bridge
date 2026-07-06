@@ -60,10 +60,10 @@ export function resolveClaudeCodeRuntimeModel(modelId: string, settings: LongCon
 				contextWindow: useOneM ? ONE_M_CONTEXT : TWO_HUNDRED_K_CONTEXT,
 			};
 		}
-    case "claude-fable-5":
-      return { cliModelId: modelId, contextWindow: ONE_M_CONTEXT };
+		case "claude-fable-5":
+			return { cliModelId: "claude-fable-5[1m]", contextWindow: ONE_M_CONTEXT };
 		case "claude-sonnet-5":
-			return { cliModelId: modelId, contextWindow: ONE_M_CONTEXT };
+			return { cliModelId: "claude-sonnet-5[1m]", contextWindow: ONE_M_CONTEXT };
 		case "claude-sonnet-4-6":
 			return {
 				cliModelId: settings.longContextExtraUsage ? "claude-sonnet-4-6[1m]" : "claude-sonnet-4-6",
