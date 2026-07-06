@@ -4,6 +4,15 @@
 
 export const MODEL_IDS_IN_ORDER = ["claude-fable-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-5", "claude-sonnet-4-6", "claude-haiku-4-5"];
 
+// Workaround for missing thinkingLevelMap in pi-ai (earendil-works/pi#6371).
+// Sonnet 5 and Sonnet 4.6 have no map, so getSupportedThinkingLevels hides
+// xhigh (it's opt-in). Both models' top effort tier is "max" with no real
+// xhigh (verified via CC supportedModels API), so xhigh→max matches opus-4-6.
+const DEFAULT_THINKING_LEVEL_MAPS: Record<string, Record<string, string>> = {
+	"claude-sonnet-5": { xhigh: "max" },
+	"claude-sonnet-4-6": { xhigh: "max" },
+};
+
 // Project pi-ai's model entries down to the fields pi's registerProvider expects,
 // and keep MODEL_IDS_IN_ORDER ordering. IDs missing from pi-ai are silently dropped.
 // Context-dependent display labels are applied after plan/long-context config is known.
@@ -16,7 +25,8 @@ export function buildModels<T extends { id: string; [key: string]: any }>(piAiMo
 		.map(({ id, name, reasoning, input, contextWindow, maxTokens, thinkingLevelMap }) => ({
 			id,
 			name,
-			reasoning, input, contextWindow, maxTokens, thinkingLevelMap,
+			reasoning, input, contextWindow, maxTokens,
+			thinkingLevelMap: thinkingLevelMap ?? DEFAULT_THINKING_LEVEL_MAPS[id],
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		}));
 }

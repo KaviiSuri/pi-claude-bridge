@@ -1,5 +1,7 @@
 # Changelog
 
+- **Fix: xhigh thinking level hidden for Sonnet 5 and Sonnet 4.6 (issue #32)** — pi-ai ships no `thinkingLevelMap` for these models, and pi's `getSupportedThinkingLevels` requires an explicit mapping to show `xhigh` in the picker. `buildModels` now fills `{ xhigh: "max" }` when pi-ai omits the map, matching the mapping Opus 4.6 already has (both have `max` as their top effort tier, no real `xhigh` — verified via CC's `supportedModels()` API and live API call).
+
 ## 0.6.1 — 2026-07-01
 
 - **Add: claude-fable-5 and claude-sonnet-5 models** — Anthropic's Claude Fable 5 (released 2026-06-09) and Sonnet 5 (released 2026-06-30) are now selectable via `/model`. Both ship 1M context only (no 200K variant, no `[1m]` entitlement toggle) and force adaptive thinking. The `fable` and `sonnet` shortcuts resolve to these new models.

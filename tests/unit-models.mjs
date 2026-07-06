@@ -59,6 +59,23 @@ describe("MODELS projection", () => {
 		assert.deepEqual(models.map((m) => m.id), MODEL_IDS_IN_ORDER);
 		assert.ok(models.every((m) => !m.name.includes("1M")));
 	});
+
+	it("fills default thinkingLevelMap for sonnet-5 and sonnet-4-6 when pi-ai omits it", () => {
+		const models = buildModels(MODEL_IDS_IN_ORDER.map(mockPiAiModel));
+		assert.deepEqual(find(models, "claude-sonnet-5")?.thinkingLevelMap, { xhigh: "max" });
+		assert.deepEqual(find(models, "claude-sonnet-4-6")?.thinkingLevelMap, { xhigh: "max" });
+	});
+
+	it("preserves pi-ai's thinkingLevelMap when present", () => {
+		const withMap = (id) => ({ ...mockPiAiModel(id), thinkingLevelMap: { xhigh: "xhigh" } });
+		const models = buildModels([withMap("claude-sonnet-5")]);
+		assert.deepEqual(find(models, "claude-sonnet-5")?.thinkingLevelMap, { xhigh: "xhigh" });
+	});
+
+	it("haiku gets no default thinkingLevelMap (no effort support)", () => {
+		const models = buildModels(MODEL_IDS_IN_ORDER.map(mockPiAiModel));
+		assert.equal(find(models, "claude-haiku-4-5")?.thinkingLevelMap, undefined);
+	});
 });
 
 describe("Claude Code runtime model policy", () => {
