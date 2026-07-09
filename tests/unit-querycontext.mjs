@@ -5,12 +5,12 @@
  */
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { ctx, resetStack } from "../src/query-state.js";
+import { ctx, resetCtx } from "../src/query-state.js";
 
 const fakeModel = { api: "anthropic", provider: "anthropic", id: "test-model" };
 
 describe("QueryContext class", () => {
-	beforeEach(() => resetStack());
+	beforeEach(() => resetCtx());
 
 	it("turnBlocks throws before resetTurnState", () => {
 		assert.throws(() => ctx().turnBlocks, /turnBlocks accessed before resetTurnState/);

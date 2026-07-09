@@ -56,8 +56,8 @@ let _ctx = new QueryContext();
 
 export function ctx(): QueryContext { return _ctx; }
 
-// Test-only: drop all state so test files can start from a clean module.
+// Test-only: replace the module-level context so test files start clean.
 // Not called from production.
-export function resetStack(): void {
+export function resetCtx(): void {
 	_ctx = new QueryContext();
 }
