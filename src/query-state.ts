@@ -1,7 +1,7 @@
-// Query state: QueryContext class + context stack.
+// Query state: QueryContext class.
 //
 // All per-query and per-turn mutable state lives here. Reentrant queries
-// (subagents) push the parent context onto a stack and get a fresh instance.
+// (subagents) each get their own QueryContext instance, managed by index.ts.
 // Adding a new field = one property on the class.
 //
 // Extracted from index.ts so tests can import without activating the extension.
@@ -53,28 +53,11 @@ export class QueryContext {
 }
 
 let _ctx = new QueryContext();
-const contextStack: QueryContext[] = [];
 
 export function ctx(): QueryContext { return _ctx; }
-
-export function stackDepth(): number { return contextStack.length; }
-
-export function pushContext(): void {
-	if (!_ctx.activeQuery) throw new Error("pushContext() called with no active query");
-	contextStack.push(_ctx);
-	_ctx = new QueryContext();
-}
-
-export function popContext(): void {
-	if (contextStack.length === 0) throw new Error("popContext() called with empty stack");
-	const parent = contextStack[contextStack.length - 1];
-	parent.deferredUserMessages.push(..._ctx.deferredUserMessages);
-	_ctx = contextStack.pop()!;
-}
 
 // Test-only: drop all state so test files can start from a clean module.
 // Not called from production.
 export function resetStack(): void {
 	_ctx = new QueryContext();
-	contextStack.length = 0;
 }

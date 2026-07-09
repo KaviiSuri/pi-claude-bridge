@@ -649,10 +649,6 @@ function mapToolArgs(
 	return result;
 }
 
-// --- Provider helpers: tool resolution ---
-
-// --- Provider helpers: tool bridge ---
-
 // --- Query state ---
 // QueryContext lives in query-state.js so tests can import it without
 // activating the extension.
