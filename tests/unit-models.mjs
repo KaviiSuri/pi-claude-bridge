@@ -60,19 +60,13 @@ describe("MODELS projection", () => {
 		assert.ok(models.every((m) => !m.name.includes("1M")));
 	});
 
-	it("fills default thinkingLevelMap for sonnet-5 and sonnet-4-6 when pi-ai omits it", () => {
-		const models = buildModels(MODEL_IDS_IN_ORDER.map(mockPiAiModel));
-		assert.deepEqual(find(models, "claude-sonnet-5")?.thinkingLevelMap, { xhigh: "max" });
-		assert.deepEqual(find(models, "claude-sonnet-4-6")?.thinkingLevelMap, { xhigh: "max" });
-	});
-
-	it("preserves pi-ai's thinkingLevelMap when present", () => {
-		const withMap = (id) => ({ ...mockPiAiModel(id), thinkingLevelMap: { xhigh: "xhigh" } });
+	it("forwards pi-ai's thinkingLevelMap verbatim", () => {
+		const withMap = (id) => ({ ...mockPiAiModel(id), thinkingLevelMap: { xhigh: "xhigh", max: "max" } });
 		const models = buildModels([withMap("claude-sonnet-5")]);
-		assert.deepEqual(find(models, "claude-sonnet-5")?.thinkingLevelMap, { xhigh: "xhigh" });
+		assert.deepEqual(find(models, "claude-sonnet-5")?.thinkingLevelMap, { xhigh: "xhigh", max: "max" });
 	});
 
-	it("haiku gets no default thinkingLevelMap (no effort support)", () => {
+	it("forwards undefined thinkingLevelMap unchanged (no fabricated defaults)", () => {
 		const models = buildModels(MODEL_IDS_IN_ORDER.map(mockPiAiModel));
 		assert.equal(find(models, "claude-haiku-4-5")?.thinkingLevelMap, undefined);
 	});
