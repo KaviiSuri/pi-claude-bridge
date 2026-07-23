@@ -1,5 +1,9 @@
 # Changelog
 
+## UNRELEASED
+
+- **Internal: remove obsolete QueryContext stack** — remove the unused push/pop/depth infrastructure superseded by `activeQueryContexts`.
+
 ## 0.6.2 — 2026-07-06
 
 - **Fix: Sonnet 5 and Fable 5 with 1M context** — bare model IDs (`claude-sonnet-5`, `claude-fable-5`) are 200K context. Must pass `[1m]` suffix for both, similar to Opus 4.8.
