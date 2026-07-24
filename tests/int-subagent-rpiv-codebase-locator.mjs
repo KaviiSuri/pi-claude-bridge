@@ -16,18 +16,13 @@ import { createRpcHarness } from "./lib/rpc-harness.mjs";
 const DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const BRIDGE_MODEL = "claude-bridge/claude-haiku-4-5";
 const TEST_TIMEOUT = 240_000;
-const SUBAGENTS_DIR = resolve(DIR, "../pi-subagents");
+// Load pi-subagents straight from npm via pi's `-e npm:` source, pinned to a
+// version that passes modelRuntime to createAgentSession (pi 0.80.8 dropped the
+// modelRegistry option); older versions fail "No API key found for claude-bridge".
+const SUBAGENTS_SOURCE = "npm:@tintinweb/pi-subagents@0.14.3";
 const RPIV_LOCATOR_FIXTURE = resolve(DIR, "tests/fixtures/rpiv-pi-v0.6.0-agents/codebase-locator.md");
 const REENTRANT_MARKER = /provider: active query user-only call treated as reentrant fresh query/g;
 const STUCK_MARKER = /MCP handlers still waiting after delivering 0 results|tool handler\(s\) still waiting|currentPiStream overwritten/;
-
-assert.ok(existsSync(SUBAGENTS_DIR), `missing pinned pi-subagents checkout: ${SUBAGENTS_DIR}`);
-const subagentsPackage = JSON.parse(readFileSync(join(SUBAGENTS_DIR, "package.json"), "utf8"));
-assert.equal(
-	subagentsPackage.version,
-	"0.6.3",
-	`expected ../pi-subagents to be pinned at 0.6.3, got ${subagentsPackage.version}`,
-);
 assert.ok(existsSync(RPIV_LOCATOR_FIXTURE), `missing rpiv codebase-locator fixture: ${RPIV_LOCATOR_FIXTURE}`);
 
 const testAgentDir = mkdtempSync(join(tmpdir(), "subagent-rpiv-locator-dir-"));
@@ -40,7 +35,7 @@ writeFileSync(join(testProjectDir, "src", "rpiv_locator.ts"), "export const RPIV
 
 const harness = createRpcHarness({
 	name: "subagent-rpiv-codebase-locator",
-	args: ["-e", SUBAGENTS_DIR, "--model", BRIDGE_MODEL],
+	args: ["-e", SUBAGENTS_SOURCE, "--model", BRIDGE_MODEL],
 	cwd: testProjectDir,
 	env: { PI_CODING_AGENT_DIR: testAgentDir },
 	defaultTimeout: TEST_TIMEOUT,
