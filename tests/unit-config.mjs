@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { loadConfig } from "../src/config.js";
 
 function withTempHome(fn) {
@@ -42,7 +42,7 @@ describe("loadConfig", () => {
 	it("merges project config over global config", () => withTempHome((home) => {
 		const cwd = mkdtempSync(join(tmpdir(), "claude-bridge-project-"));
 		try {
-			const globalDir = join(home, ".pi", "agent");
+			const globalDir = getAgentDir();
 			const projectDir = join(cwd, CONFIG_DIR_NAME);
 			mkdirSync(globalDir, { recursive: true });
 			mkdirSync(projectDir, { recursive: true });
@@ -60,6 +60,28 @@ describe("loadConfig", () => {
 				askClaude: { enabled: false, defaultMode: "read" },
 			});
 		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	}));
+
+	it("resolves global config via PI_CODING_AGENT_DIR override, not hardcoded ~/.pi/agent", () => withTempHome(() => {
+		const agentDir = mkdtempSync(join(tmpdir(), "claude-bridge-agent-"));
+		const cwd = mkdtempSync(join(tmpdir(), "claude-bridge-project-"));
+		const oldEnv = process.env.PI_CODING_AGENT_DIR;
+		try {
+			process.env.PI_CODING_AGENT_DIR = agentDir;
+			writeFileSync(join(agentDir, "claude-bridge.json"), JSON.stringify({
+				provider: { plan: "max" },
+			}));
+
+			assert.deepEqual(loadConfig(cwd), {
+				provider: { plan: "max" },
+				askClaude: {},
+			});
+		} finally {
+			if (oldEnv === undefined) delete process.env.PI_CODING_AGENT_DIR;
+			else process.env.PI_CODING_AGENT_DIR = oldEnv;
+			rmSync(agentDir, { recursive: true, force: true });
 			rmSync(cwd, { recursive: true, force: true });
 		}
 	}));
