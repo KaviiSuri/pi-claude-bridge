@@ -38,6 +38,7 @@ export function createRpcHarness(opts) {
 	const cleanPath = process.env.PATH.split(":").filter((p) => !p.includes("node_modules")).join(":");
 
 	let pi, rpcLog;
+	let stopped = false;
 	let buffer = "";
 	let listeners = [];
 	let reqId = 0;
@@ -47,6 +48,7 @@ export function createRpcHarness(opts) {
 		// log see only this run's output, not accumulated history from prior
 		// failing runs. RPC log is still append so cross-run comparisons work.
 		writeFileSync(DEBUG_LOG, "");
+		stopped = false;
 		rpcLog = createWriteStream(RPC_LOG, { flags: "a" });
 		const spawnArgs = ["--no-session", "-ne", "-e", DIR, "--mode", "rpc", ...args];
 		pi = spawn("pi", spawnArgs, {
@@ -55,10 +57,13 @@ export function createRpcHarness(opts) {
 			env: { ...process.env, PATH: cleanPath, CLAUDE_BRIDGE_DEBUG: "1", CLAUDE_BRIDGE_DEBUG_PATH: DEBUG_LOG, ...env },
 		});
 
-		pi.stderr.on("data", (d) => rpcLog.write(d));
+		// The killed subprocess can still flush buffered stdout/stderr after stop()
+		// has ended rpcLog; guard writes so teardown doesn't throw write-after-end.
+		pi.stderr.on("data", (d) => { if (!stopped) rpcLog.write(d); });
 
 		const decoder = new StringDecoder("utf8");
 		pi.stdout.on("data", (chunk) => {
+			if (stopped) return;
 			buffer += decoder.write(chunk);
 			while (true) {
 				const i = buffer.indexOf("\n");
@@ -80,6 +85,7 @@ export function createRpcHarness(opts) {
 	}
 
 	function stop() {
+		stopped = true;
 		pi?.kill();
 		return new Promise((r) => rpcLog?.end(r));
 	}
