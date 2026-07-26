@@ -32,6 +32,8 @@ the footnote below the table).
 
 | requested id              | Pro, credits off | Pro, credits on | Max, credits off | Max, credits on |
 |---------------------------|------------------|-----------------|------------------|-----------------|
+| `claude-opus-5`           | —                | —               | 200K             | —               |
+| `claude-opus-5[1m]`      | —                | —               | 1M               | —               |
 | `claude-opus-4-8`         | 200K             | 200K            | 200K             | 200K            |
 | `claude-opus-4-8[1m]`    | 1M               | 1M              | 1M               | 1M              |
 | `claude-opus-4-7`         | 1M               | 1M              | 1M               | 1M              |

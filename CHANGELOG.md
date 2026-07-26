@@ -2,6 +2,8 @@
 
 ## UNRELEASED
 
+- **Add: claude-opus-5 model** — Claude Opus 5 is selectable via `/model` and the `opus` shortcut now points to it.
+- **Bump: pi >=0.82.1** — required for the `claude-opus-5` model catalog entry.
 - **Internal: remove obsolete QueryContext stack** — remove the unused push/pop/depth infrastructure superseded by `activeQueryContexts`.
 
 ## 0.6.2 — 2026-07-06
