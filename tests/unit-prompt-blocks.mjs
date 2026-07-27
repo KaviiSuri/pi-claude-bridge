@@ -1,5 +1,11 @@
-import { describe, it } from "node:test";
+import { describe, it, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+const debugDir = mkdtempSync(join(tmpdir(), "prompt-blocks-debug-"));
+process.env.CLAUDE_BRIDGE_DEBUG_PATH = join(debugDir, "claude-bridge.log");
 
 const { __test } = await import("../src/index.js");
 
@@ -28,5 +34,52 @@ describe("extractUserPromptBlocks", () => {
 		]);
 
 		assert.equal(blocks, null);
+	});
+
+});
+
+after(() => rmSync(debugDir, { recursive: true, force: true }));
+
+describe("history/prompt split", () => {
+	afterEach(() => __test.resetSharedSession());
+
+	// The turn boundary is computed once and both halves derive from it, so a
+	// message can never be replayed as history *and* resent as the prompt.
+	it("does not replay the current turn as session history", () => {
+		const cwd = mkdtempSync(join(tmpdir(), "turn-split-"));
+		const claudeDir = mkdtempSync(join(tmpdir(), "turn-split-cfg-"));
+		const prevConfigDir = process.env.CLAUDE_CONFIG_DIR;
+		process.env.CLAUDE_CONFIG_DIR = claudeDir;
+		try {
+			const messages = [
+				{ role: "user", content: "earlier question", timestamp: 1 },
+				{ role: "assistant", content: [{ type: "text", text: "earlier answer" }], timestamp: 2 },
+				// The current turn: real image-bearing message plus an extension's
+				// trailing display-only message (issue #34).
+				{ role: "user", content: [
+					{ type: "text", text: "describe this" },
+					{ type: "image", mimeType: "image/png", data: "aW1hZ2U=" },
+				], timestamp: 3 },
+				{ role: "user", content: "(attachment preview: [#image 1])", timestamp: 4 },
+			];
+
+			const { sessionId } = __test.syncSharedSession(messages, cwd);
+			// readdir rather than fs.globSync — the latter is Node 22+, and engines allows 20.
+			const projectsDir = join(claudeDir, "projects");
+			const [projectDir] = readdirSync(projectsDir);
+			assert.ok(projectDir, "syncSharedSession should have written a session file");
+			const history = readFileSync(join(projectsDir, projectDir, `${sessionId}.jsonl`), "utf8");
+			const prompt = JSON.stringify(__test.extractUserPromptBlocks(messages));
+
+			assert.match(prompt, /describe this/, "the image-bearing message belongs in the prompt");
+			assert.doesNotMatch(history, /describe this/, "and must not also be replayed as history");
+			assert.match(history, /earlier question/, "genuinely prior turns still become history");
+		} finally {
+			// Assigning undefined would set the literal string "undefined".
+			if (prevConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+			else process.env.CLAUDE_CONFIG_DIR = prevConfigDir;
+			rmSync(cwd, { recursive: true, force: true });
+			rmSync(claudeDir, { recursive: true, force: true });
+		}
 	});
 });
