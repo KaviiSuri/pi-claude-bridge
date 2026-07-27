@@ -1,6 +1,6 @@
 # Changelog
 
-## UNRELEASED
+## 0.6.3 — 2026-07-26
 
 - **Add: claude-opus-5 model** — Claude Opus 5 is selectable via `/model` and the `opus` shortcut now points to it.
 - **Bump: pi >=0.82.1** — required for the `claude-opus-5` model catalog entry.
