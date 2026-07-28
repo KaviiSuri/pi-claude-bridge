@@ -251,7 +251,12 @@ function turnStart(messages: Context["messages"]): number {
 function extractUserPrompt(messages: Context["messages"]): string | null {
 	const turn = messages.slice(turnStart(messages)) as UserMessage[];
 	if (turn.length === 0) return null;
-	return turn.map((m) => (typeof m.content === "string" ? m.content : messageContentToText(m.content))).join("\n");
+	// Drop empties before joining so an all-empty turn still yields "" and trips
+	// the caller's empty-prompt guard rather than sending bare newlines.
+	return turn
+		.map((m) => (typeof m.content === "string" ? m.content : messageContentToText(m.content)))
+		.filter((text) => text)
+		.join("\n");
 }
 
 /** Extract the current user turn as ContentBlockParam[] (preserving images).
@@ -270,11 +275,14 @@ function extractUserPromptBlocks(messages: Context["messages"]): ContentBlockPar
 			if (block.type === "text" && block.text) {
 				blocks.push({ type: "text", text: block.text });
 			} else if (block.type === "image") {
-				debug(`image block: mimeType=${block.mimeType}, data length=${block.data.length}, keys=${Object.keys(block).join(",")}`);
+				// Guard before logging: data-less image blocks do occur, and reading
+				// .length off the missing field in the debug template would throw
+				// before this check ever runs (template args evaluate unconditionally).
 				if (!block.data || !block.mimeType) {
-					debug(`image block missing data or mimeType, skipping`);
+					debug(`image block missing data or mimeType, skipping: keys=${Object.keys(block).join(",")}`);
 					continue;
 				}
+				debug(`image block: mimeType=${block.mimeType}, data length=${block.data.length}`);
 				hasImage = true;
 				blocks.push({
 					type: "image",

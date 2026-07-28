@@ -36,6 +36,22 @@ describe("extractUserPromptBlocks", () => {
 		assert.equal(blocks, null);
 	});
 
+	// Data-less image blocks occur in the wild; the skip guard has to run before
+	// the debug line that reads .length off the missing field.
+	it("skips malformed image blocks instead of throwing", () => {
+		const blocks = __test.extractUserPromptBlocks([
+			{ role: "user", content: [
+				{ type: "text", text: "look" },
+				{ type: "image", mimeType: "image/png" },
+				{ type: "image", mimeType: "image/png", data: "aW1hZ2U=" },
+			] },
+		]);
+
+		assert.deepEqual(blocks, [
+			{ type: "text", text: "look" },
+			{ type: "image", source: { type: "base64", media_type: "image/png", data: "aW1hZ2U=" } },
+		]);
+	});
 });
 
 after(() => rmSync(debugDir, { recursive: true, force: true }));
