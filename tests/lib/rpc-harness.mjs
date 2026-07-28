@@ -20,7 +20,9 @@ if (existsSync(ENV_FILE)) process.loadEnvFile(ENV_FILE);
 // those writes lets the first query succeed and then fails the next turn's
 // --resume with "No conversation found with session ID", which reads like a
 // bridge bug. Surface the real cause up front.
-const PROBE = resolve(homedir(), ".claude", ".int-test-write-probe");
+// Per-pid name: `npm test` runs the int-*.mjs files concurrently, and a shared
+// probe path lets one process delete the file another is still using.
+const PROBE = resolve(homedir(), ".claude", `.int-test-write-probe-${process.pid}`);
 try {
 	writeFileSync(PROBE, "");
 	rmSync(PROBE);
