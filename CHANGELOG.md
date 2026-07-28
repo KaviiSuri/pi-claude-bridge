@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **Fix: images dropped when not on the final user message (issue #34)** — `extractUserPromptBlocks` only scanned the last message, so an image followed by a trailing text preview lost the image. Now scans the full trailing run of user messages and hoists all image blocks.
+- **Fix: crash on data-less image blocks** — the debug log read `block.data.length` before the guard that skips data-less images, so one malformed block threw out of the fresh-query path on every retry.
+
 ## 0.6.3 — 2026-07-26
 
 - **Add: claude-opus-5 model** — Claude Opus 5 is selectable via `/model` and the `opus` shortcut now points to it.
