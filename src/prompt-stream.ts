@@ -79,6 +79,8 @@ export function makePromptStream(): PromptStream {
 	};
 }
 
+/** `uuid` is deliberately omitted: we need no dedup, and supplying one makes
+ *  CC's stdin loop do a session lookup on the message. */
 export function userMessage(content: SDKUserMessage["message"]["content"], priority?: SDKUserMessage["priority"]): SDKUserMessage {
 	return {
 		type: "user",
