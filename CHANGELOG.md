@@ -6,6 +6,8 @@
 - **Fix: images dropped when not on the final user message (issue #34)** — `extractUserPromptBlocks` only scanned the last message, so an image followed by a trailing text preview lost the image. Now scans the full trailing run of user messages and hoists all image blocks.
 - **Fix: crash on data-less image blocks** — the debug log read `block.data.length` before the guard that skips data-less images, so one malformed block threw out of the fresh-query path on every retry.
 - **Tests: harness hygiene** — the unit suite redirects `CLAUDE_BRIDGE_DEBUG_PATH` via a preloaded `tests/lib/setup.mjs` instead of per-file boilerplate, so no test can write to the real bridge log; the integration harness now probes `~/.claude` for writability at startup and fails fast instead of surfacing a confusing `No conversation found with session ID` on the next resume. The probe filename is per-pid — the shared name raced under the concurrent int runner, killing a random test file at import with that same misleading error.
+- **Add: one-time plan notice** — `provider.plan` defaults to `"pro"`, so Max subscribers silently lose Opus at 1M context if they don't set plan in settings. Now prints a one-time notice if plan isn't set.
+
 
 ## 0.6.3 — 2026-07-26
 

@@ -17,7 +17,7 @@ import { verifyWrittenSession as _verifyWrittenSession } from "./session-verify.
 import { extractAllToolResults as _extractAllToolResults, type McpResult } from "./extract-tool-results.js";
 import { QueryContext, ctx } from "./query-state.js";
 import { makePromptStream, userMessage } from "./prompt-stream.js";
-import { loadConfig, type Config } from "./config.js";
+import { loadConfig, markStartupNoticeShown, type Config } from "./config.js";
 import { extractAgentsAppend } from "./agents-md.js";
 import { jsonSchemaToZodShape } from "./typebox-to-zod.js";
 import { buildActionSummary, type ToolCallState } from "./askclaude-ui.js";
@@ -1664,6 +1664,10 @@ export default function (pi: ExtensionAPI) {
 	};
 	const registeredModels = applyLongContext(MODELS, longContextSettings);
 
+	// `plan` is the one setting whose default silently costs the user something
+	// (no Opus 1M on Max), so announce it once.
+	let planNoticePending = config.provider?.plan === undefined && !config.startupNoticeShown;
+
 	// Reset shared session on pi session lifecycle events
 	const clearSession = (event: string) => {
 		debug(`${event}: clearing session ${sharedSession?.sessionId?.slice(0, 8) ?? "none"}`);
@@ -1680,6 +1684,14 @@ export default function (pi: ExtensionAPI) {
 	};
 	pi.on("session_start", (event, ctx) => {
 		piUI = ctx.ui;
+		if (planNoticePending && ctx.hasUI) {
+			planNoticePending = false;
+			const path = markStartupNoticeShown();
+			ctx.ui.notify(
+				`Claude bridge: assuming a Pro plan. On Max (or Team Premium/Enterprise), set provider.plan to "max" in ${path} to unlock Opus at 1M context.`,
+				"info",
+			);
+		}
 		if (event.reason === "new" || event.reason === "resume" || event.reason === "fork") {
 			clearSession(`session_start:${event.reason}`);
 		}

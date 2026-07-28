@@ -6,10 +6,12 @@
 
 import type { SettingSource } from "@anthropic-ai/claude-agent-sdk";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { existsSync, readFileSync } from "fs";
-import { join } from "path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { dirname, join } from "path";
 
 export interface Config {
+	/** Date (YYYY-MM-DD) the one-time startup notice was shown. Written by the extension, not the user. */
+	startupNoticeShown?: string;
 	askClaude?: {
 		enabled?: boolean;
 		name?: string;
@@ -45,10 +47,26 @@ export function tryParseJson(path: string): Partial<Config> {
 	}
 }
 
+export function globalConfigPath(): string {
+	return join(getAgentDir(), "claude-bridge.json");
+}
+
+/** Record today's date in the global config so the startup notice shows once. Preserves every other field. */
+export function markStartupNoticeShown(): string {
+	const path = globalConfigPath();
+	// en-CA renders YYYY-MM-DD in local time; toISOString() would report UTC.
+	const today = new Date().toLocaleDateString("en-CA");
+	const next = { ...tryParseJson(path), startupNoticeShown: today };
+	mkdirSync(dirname(path), { recursive: true });
+	writeFileSync(path, `${JSON.stringify(next, null, 2)}\n`);
+	return path;
+}
+
 export function loadConfig(cwd: string): Config {
-	const global = tryParseJson(join(getAgentDir(), "claude-bridge.json"));
+	const global = tryParseJson(globalConfigPath());
 	const project = tryParseJson(join(cwd, CONFIG_DIR_NAME, "claude-bridge.json"));
 	return {
+		startupNoticeShown: project.startupNoticeShown ?? global.startupNoticeShown,
 		askClaude: { ...global.askClaude, ...project.askClaude },
 		provider: { ...global.provider, ...project.provider },
 	};
