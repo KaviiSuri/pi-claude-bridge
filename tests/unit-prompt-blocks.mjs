@@ -52,6 +52,15 @@ describe("extractUserPromptBlocks", () => {
 			{ type: "image", source: { type: "base64", media_type: "image/png", data: "aW1hZ2U=" } },
 		]);
 	});
+
+	// Off-type content is a contract violation, so it should fail loudly — and
+	// name the shape, since the culprit is usually another extension.
+	it("throws a legible error on off-type content", () => {
+		assert.throws(
+			() => __test.extractUserPromptBlocks([{ role: "user", content: undefined }]),
+			/content must be a string or block array, got undefined/,
+		);
+	});
 });
 
 after(() => rmSync(debugDir, { recursive: true, force: true }));

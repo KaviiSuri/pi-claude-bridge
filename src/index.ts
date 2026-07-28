@@ -271,6 +271,14 @@ function extractUserPromptBlocks(messages: Context["messages"]): ContentBlockPar
 		const content: (TextContent | ImageContent)[] = typeof message.content === "string"
 			? [{ type: "text", text: message.content }]
 			: message.content;
+		// Off-type content violates UserMessage's contract, so fail rather than
+		// degrade — but name the shape, since the cause is almost always another
+		// extension appending a malformed message, not this file.
+		if (!Array.isArray(content)) {
+			throw new Error(
+				`extractUserPromptBlocks: user message content must be a string or block array, got ${typeof content} — likely a malformed message from another extension`,
+			);
+		}
 		for (const block of content) {
 			if (block.type === "text" && block.text) {
 				blocks.push({ type: "text", text: block.text });
