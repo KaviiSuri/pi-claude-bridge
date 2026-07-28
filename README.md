@@ -97,6 +97,8 @@ Config: `~/.pi/agent/claude-bridge.json` (global) or the project Pi config direc
 
 `npm test` for the full suite, which adds integration tests that hit APIs (`tests/int-*.{sh,mjs}`: smoke, multi-turn, cache, session-resume, session-rebuild, tool-message). Set `CLAUDE_BRIDGE_TESTING_ALT_MODEL` in `.env.test` for the alt-provider smoke test (e.g. `openrouter/z-ai/glm-4.7-flash`).
 
+Integration tests spawn real `pi` and Claude Code subprocesses, so they need write access to `~/.claude` for CC's session state — a sandbox that blocks it makes the next turn's `--resume` fail with `No conversation found with session ID`. The RPC harness probes for this at startup and fails fast.
+
 ## Debugging
 
 Set `CLAUDE_BRIDGE_DEBUG=1` to enable debug output:
