@@ -1,22 +1,15 @@
 /**
  * Regression tests for syncSharedSession's session reuse decisions.
  */
-import { describe, it, after, afterEach } from "node:test";
+import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const debugDir = mkdtempSync(join(tmpdir(), "sync-shared-session-debug-"));
-process.env.CLAUDE_BRIDGE_DEBUG_PATH = join(debugDir, "claude-bridge.log");
-
 const { __test } = await import("../src/index.js");
 
 describe("syncSharedSession", () => {
-	after(() => {
-		rmSync(debugDir, { recursive: true, force: true });
-	});
-
 	afterEach(() => {
 		__test.resetSharedSession();
 	});

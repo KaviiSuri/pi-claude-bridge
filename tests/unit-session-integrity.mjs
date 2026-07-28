@@ -8,6 +8,7 @@
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { repairToolPairing } from "cc-session-io";
 import { verifyWrittenSession } from "../src/session-verify.js";
@@ -46,7 +47,7 @@ describe("repairToolPairing", () => {
 });
 
 describe("verifyWrittenSession", () => {
-	const dir = mkdtempSync("/tmp/verify-session-");
+	const dir = mkdtempSync(join(tmpdir(), "verify-session-"));
 	const path = join(dir, "session.jsonl");
 	const SID = "abc-123";
 	const rec = (sessionId, i) => JSON.stringify({ sessionId, idx: i });
