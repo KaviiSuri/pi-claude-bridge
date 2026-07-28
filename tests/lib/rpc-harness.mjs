@@ -87,7 +87,7 @@ export function createRpcHarness(opts) {
 				buffer = buffer.slice(i + 1);
 				try {
 					const msg = JSON.parse(line);
-					rpcLog.write(`< ${line}\n`);
+					rpcLog?.write(`< ${line}\n`);
 					for (const fn of [...listeners]) fn(msg);
 				} catch {}
 			}
@@ -102,7 +102,12 @@ export function createRpcHarness(opts) {
 	function stop() {
 		stopped = true;
 		pi?.kill();
-		return new Promise((r) => rpcLog?.end(r));
+		// Drop the handle before ending it: pi can still emit a line or two after
+		// kill(), and writing to an ended stream throws asynchronously, which the
+		// test runner reports as a file-level failure.
+		const log = rpcLog;
+		rpcLog = null;
+		return new Promise((r) => (log ? log.end(r) : r()));
 	}
 
 	function addListener(fn) {
@@ -116,7 +121,7 @@ export function createRpcHarness(opts) {
 	function send(cmd, timeout = defaultTimeout) {
 		const id = `req_${++reqId}`;
 		const full = { ...cmd, id };
-		rpcLog.write(`> ${JSON.stringify(full)}\n`);
+		rpcLog?.write(`> ${JSON.stringify(full)}\n`);
 		pi.stdin.write(JSON.stringify(full) + "\n");
 		return new Promise((resolve, reject) => {
 			const timer = setTimeout(() => reject(new Error(`Timeout: ${cmd.type}`)), timeout);

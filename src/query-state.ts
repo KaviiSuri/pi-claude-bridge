@@ -8,6 +8,7 @@
 
 import type { AssistantMessage, AssistantMessageEventStream, Model } from "@earendil-works/pi-ai";
 import type { McpResult } from "./extract-tool-results.js";
+import type { PromptStream } from "./prompt-stream.js";
 
 export interface PendingToolCall {
 	toolName: string;
@@ -23,7 +24,8 @@ export class QueryContext {
 	pendingResults = new Map<string, McpResult>();
 	turnToolCallIds: string[] = [];
 	nextHandlerIdx = 0;
-	deferredUserMessages: string[] = [];
+	/** Streaming-input handle for the active query — how steers reach CC mid-turn. */
+	promptStream: PromptStream | null = null;
 
 	// Per-turn (reset together)
 	turnOutput: AssistantMessage | null = null;
