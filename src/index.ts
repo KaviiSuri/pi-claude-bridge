@@ -722,8 +722,12 @@ function resolveMcpTools(context: Context, excludeToolName?: string): {
 
 // Creates an MCP server that bridges pi tools to the SDK. Each tool handler
 // blocks on a Promise until pi delivers the tool result via streamSimple.
-// Handlers are assigned toolCallIds from turnToolCallIds (populated when the SDK
-// emits tool_use blocks). Results are matched by ID, not position.
+// Handlers receive their toolCallId from Claude's tools/call _meta, so results
+// are matched by ID end to end.
+//
+// The handler and pi's result can arrive in either order, hence the two maps:
+// a result that lands first waits in `pendingResults` for the handler to claim
+// it, and a handler that runs first parks its resolver in `pendingToolCalls`.
 // Handlers close over the captured `queryCtx`, ensuring they operate on the
 // correct query's state while multiple queries run concurrently.
 function buildMcpServers(tools: Tool[], queryCtx: QueryContext): Record<string, ReturnType<typeof createToolServer>> | undefined {
@@ -732,10 +736,8 @@ function buildMcpServers(tools: Tool[], queryCtx: QueryContext): Record<string, 
 		name: tool.name,
 		description: tool.description,
 		inputSchema: tool.parameters,
-		handler: async () => {
-			const toolCallId = queryCtx.turnToolCallIds[queryCtx.nextHandlerIdx++];
-			if (!toolCallId) debug(`WARNING: mcp handler ${tool.name} has no toolCallId (idx=${queryCtx.nextHandlerIdx - 1}, available=${queryCtx.turnToolCallIds.length})`);
-			if (toolCallId && queryCtx.pendingResults.has(toolCallId)) {
+		handler: async (toolCallId: string) => {
+			if (queryCtx.pendingResults.has(toolCallId)) {
 				const result = queryCtx.pendingResults.get(toolCallId)!;
 				queryCtx.pendingResults.delete(toolCallId);
 				debug(`mcp handler: ${tool.name} [${toolCallId}] → resolved from queue (${queryCtx.pendingResults.size} remaining)`);
@@ -866,7 +868,6 @@ function processStreamEvent(
 
 	if (event?.type === "message_start") {
 		c.turnToolCallIds = [];
-		c.nextHandlerIdx = 0;
 		if (event.message?.usage) updateUsage(c.turnOutput, event.message.usage, model);
 		return;
 	}
@@ -976,7 +977,6 @@ function processAssistantMessage(message: SDKMessage, model: Model<any>, customT
 	const assistantMsg = (message as any).message;
 	if (!assistantMsg?.content) return;
 	c.turnToolCallIds = [];
-	c.nextHandlerIdx = 0;
 	debug(`processAssistantMessage fallback: ${assistantMsg.content.length} blocks, types=${assistantMsg.content.map((b: any) => b.type).join(",")}`);
 	for (const block of assistantMsg.content) {
 		if (block.type === "text" && block.text) {

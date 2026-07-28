@@ -22,8 +22,10 @@ export class QueryContext {
 	latestCursor = 0;
 	pendingToolCalls = new Map<string, PendingToolCall>();
 	pendingResults = new Map<string, McpResult>();
+	/** tool_use ids emitted this turn. Sole purpose is routing a delivered result
+	 *  to the owning query when several queries are in flight — pairing a result
+	 *  to its call is done by id from Claude's tools/call _meta, not from here. */
 	turnToolCallIds: string[] = [];
-	nextHandlerIdx = 0;
 	/** Streaming-input handle for the active query — how steers reach CC mid-turn. */
 	promptStream: PromptStream | null = null;
 
@@ -49,8 +51,9 @@ export class QueryContext {
 		this.turnStarted = false;
 		this.turnSawStreamEvent = false;
 		this.turnSawToolCall = false;
-		// turnToolCallIds and nextHandlerIdx are NOT reset — they persist across
-		// tool-result delivery callbacks within the same assistant message.
+		// turnToolCallIds is NOT reset — it persists across tool-result delivery
+		// callbacks within the same assistant message so results can be routed to
+		// this query while its handlers are still pending.
 	}
 }
 

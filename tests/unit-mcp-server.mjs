@@ -1,6 +1,7 @@
 /**
- * Tool schemas the bridge advertises to Claude Code must survive the trip
- * verbatim, including below the top level.
+ * What the bridge puts on the MCP wire: tool schemas must survive verbatim
+ * (including below the top level), and tool calls must be paired with Claude's
+ * own tool_use id.
  *
  * Drives the MCP server the same way the Agent SDK does — `instance.connect()`
  * with a transport, then raw JSON-RPC — so the assertions cover what Claude
@@ -58,13 +59,21 @@ async function connectClient(server) {
 			transport.onmessage({ jsonrpc: "2.0", id, method, params });
 		});
 
+	// Claude Code identifies the call it is making via _meta on every tools/call.
+	const callTool = (name, toolUseId, args = {}) =>
+		request("tools/call", {
+			name,
+			arguments: args,
+			...(toolUseId ? { _meta: { "claudecode/toolUseId": toolUseId } } : {}),
+		});
+
 	await request("initialize", {
 		protocolVersion: "2025-06-18",
 		capabilities: {},
 		clientInfo: { name: "test", version: "1.0.0" },
 	});
 	transport.onmessage({ jsonrpc: "2.0", method: "notifications/initialized" });
-	return request;
+	return { request, callTool };
 }
 
 describe("MCP tool schema advertisement", () => {
@@ -79,7 +88,7 @@ describe("MCP tool schema advertisement", () => {
 				handler: async () => ({ content: [{ type: "text", text: "ok" }] }),
 			},
 		]);
-		const request = await connectClient(server);
+		const { request } = await connectClient(server);
 		listed = (await request("tools/list", {})).result.tools[0].inputSchema;
 	});
 
@@ -110,59 +119,107 @@ describe("MCP tool schema advertisement", () => {
 });
 
 describe("MCP tool invocation", () => {
+	// Two tools, so a handler picked by position rather than by name/id is visible.
+	const twoTools = (record) => [
+		{
+			name: "alpha",
+			description: "a",
+			inputSchema: { type: "object", properties: {} },
+			handler: async (toolCallId) => {
+				record.push(["alpha", toolCallId]);
+				return { content: [{ type: "text", text: "from alpha" }] };
+			},
+		},
+		{
+			name: "beta",
+			description: "b",
+			inputSchema: { type: "object", properties: { x: { type: "string" } }, required: ["x"] },
+			handler: async (toolCallId) => {
+				record.push(["beta", toolCallId]);
+				return { content: [{ type: "text", text: "from beta" }], isError: true };
+			},
+		},
+	];
+
 	it("routes tools/call to the matching handler", async () => {
 		const calls = [];
-		const server = createToolServer("custom-tools", [
-			{
-				name: "alpha",
-				description: "a",
-				inputSchema: { type: "object", properties: {} },
-				handler: async () => {
-					calls.push("alpha");
-					return { content: [{ type: "text", text: "from alpha" }] };
-				},
-			},
-			{
-				name: "beta",
-				description: "b",
-				inputSchema: { type: "object", properties: { x: { type: "string" } }, required: ["x"] },
-				handler: async () => {
-					calls.push("beta");
-					return { content: [{ type: "text", text: "from beta" }], isError: true };
-				},
-			},
-		]);
-		const request = await connectClient(server);
+		const { callTool } = await connectClient(createToolServer("custom-tools", twoTools(calls)));
 
-		const beta = await request("tools/call", { name: "beta", arguments: { x: "hi" } });
-		assert.deepStrictEqual(calls, ["beta"]);
+		const beta = await callTool("beta", "toolu_b", { x: "hi" });
+		assert.deepStrictEqual(calls, [["beta", "toolu_b"]]);
 		assert.strictEqual(beta.result.content[0].text, "from beta");
 		assert.strictEqual(beta.result.isError, true);
 	});
 
+	// Claude sends the authoritative tool_use id on every call. Inferring it from
+	// call order instead silently pairs a result with the wrong call whenever the
+	// order diverges — e.g. parallel tool calls, or a call that never arrives.
+	it("hands the handler Claude's tool_use id, not one inferred from call order", async () => {
+		const calls = [];
+		const { callTool } = await connectClient(createToolServer("custom-tools", twoTools(calls)));
+
+		await callTool("beta", "toolu_second", { x: "hi" });
+		await callTool("alpha", "toolu_first");
+
+		assert.deepStrictEqual(calls, [["beta", "toolu_second"], ["alpha", "toolu_first"]]);
+	});
+
+	it("fails loudly when the tool_use id is absent rather than mispairing", async () => {
+		const calls = [];
+		const { callTool } = await connectClient(createToolServer("custom-tools", twoTools(calls)));
+
+		const res = await callTool("alpha", null);
+		const message = res.error?.message ?? JSON.stringify(res.result);
+		assert.match(message, /toolUseId/i);
+		assert.deepStrictEqual(calls, [], "handler must not run without an id to pair its result to");
+	});
+
+	// toolCallId is internal bookkeeping for pairing results; it is not part of
+	// MCP's CallToolResult and has no business on the wire.
+	it("does not leak internal fields into the tool result", async () => {
+		const { callTool } = await connectClient(
+			createToolServer("custom-tools", [
+				{
+					name: "alpha",
+					description: "a",
+					inputSchema: { type: "object", properties: {} },
+					handler: async (toolCallId) => ({
+						content: [{ type: "text", text: "ok" }],
+						isError: false,
+						toolCallId,
+					}),
+				},
+			]),
+		);
+
+		const res = await callTool("alpha", "toolu_x");
+		assert.deepStrictEqual(Object.keys(res.result).sort(), ["content", "isError"]);
+	});
+
 	// A schema-validation rejection would skip the handler entirely, desyncing
-	// the toolCallId cursor that pairs later results with their calls.
+	// the result pairing.
 	it("invokes the handler even when arguments do not match the schema", async () => {
 		let called = false;
-		const server = createToolServer("custom-tools", [
-			{
-				name: "strict",
-				description: "s",
-				inputSchema: {
-					type: "object",
-					properties: { count: { type: "number" } },
-					required: ["count"],
-					additionalProperties: false,
+		const { callTool } = await connectClient(
+			createToolServer("custom-tools", [
+				{
+					name: "strict",
+					description: "s",
+					inputSchema: {
+						type: "object",
+						properties: { count: { type: "number" } },
+						required: ["count"],
+						additionalProperties: false,
+					},
+					handler: async () => {
+						called = true;
+						return { content: [{ type: "text", text: "ran" }] };
+					},
 				},
-				handler: async () => {
-					called = true;
-					return { content: [{ type: "text", text: "ran" }] };
-				},
-			},
-		]);
-		const request = await connectClient(server);
+			]),
+		);
 
-		const res = await request("tools/call", { name: "strict", arguments: { count: "not-a-number", extra: 1 } });
+		const res = await callTool("strict", "toolu_y", { count: "not-a-number", extra: 1 });
 		assert.ok(called, "handler must run — pi validates and executes tools, not the MCP layer");
 		assert.strictEqual(res.result.content[0].text, "ran");
 	});
