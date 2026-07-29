@@ -335,11 +335,15 @@ function extractIsolatedSummaryPrompt(messages: Context["messages"]): string {
 	return promptText;
 }
 
-function resultErrorText(message: SDKMessage): string {
-	const result = message as SDKMessage & { subtype?: string; errors?: unknown; error?: unknown };
+/** Failure text for an SDK result, or undefined when it succeeded. CC reports API failures
+ *  (429 capacity, overload, prompt-too-long) with `is_error` on an otherwise success-shaped
+ *  result; the dedicated error subtypes carry `errors` instead. */
+function resultErrorText(message: SDKMessage): string | undefined {
+	const result = message as SDKMessage & { subtype?: string; is_error?: boolean; result?: string; errors?: unknown; error?: unknown };
+	if (result.subtype === "success") return result.is_error ? result.result || "Claude Code reported an error" : undefined;
 	if (Array.isArray(result.errors)) return result.errors.map(String).join("\n");
 	if (typeof result.error === "string") return result.error;
-	return `Claude Code summary failed: ${result.subtype ?? "unknown result"}`;
+	return `Claude Code failed: ${result.subtype ?? "unknown result"}`;
 }
 
 function isolatedStreamFn(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
@@ -410,11 +414,8 @@ async function runIsolatedSummary(
 				}
 			} else if (message.type === "result") {
 				logServedContextWindow("compact summary", message, model);
-				if (message.subtype === "success") {
-					finalText = message.result || assistantText;
-				} else {
-					errorText = resultErrorText(message);
-				}
+				errorText = resultErrorText(message);
+				if (!errorText && message.subtype === "success") finalText = message.result || assistantText;
 			}
 		}
 
@@ -632,6 +633,9 @@ export const __test = {
 	},
 	syncSharedSession,
 	extractUserPromptBlocks,
+	consumeQuery,
+	finalizeCurrentStream,
+	resultErrorText,
 };
 
 // --- Provider helpers: tool name mapping ---
@@ -853,9 +857,13 @@ function finalizeCurrentStream(c: QueryContext, stopReason?: string): void {
 	if (!c.currentPiStream || !c.turnOutput) return;
 	debug(`provider: finalizeCurrentStream called, stopReason=${stopReason}, turnOutput=${JSON.stringify({stopReason: c.turnOutput!.stopReason, error: c.turnOutput!.errorMessage})}`);
 	if (!c.turnStarted) ensureTurnStarted(c);
-	const reason = stopReason === "length" ? "length" : "stop";
 	const stream = c.currentPiStream;
-	stream!.push({ type: "done", reason, message: c.turnOutput });
+	if (c.turnOutput.stopReason === "error") {
+		stream!.push({ type: "error", reason: "error", error: c.turnOutput });
+	} else {
+		const reason = stopReason === "length" ? "length" : "stop";
+		stream!.push({ type: "done", reason, message: c.turnOutput });
+	}
 	markStreamComplete(stream);
 	stream!.end();
 	c.currentPiStream = null;
@@ -1060,9 +1068,19 @@ async function consumeQuery(
 			case "assistant":
 				processAssistantMessage(message, model, customToolNameToPi, queryCtx);
 				break;
-			case "result":
+			case "result": {
 				logServedContextWindow("result", message, model);
-				if (!queryCtx.turnSawStreamEvent && message.subtype === "success") {
+				// CC streams the failure text as a <synthetic> assistant message before the
+				// result, then exits non-zero — so the SDK generator rejects and the provider's
+				// catch path finishes the turn. Recording the cause here keeps the API's own
+				// message instead of the SDK's generic wrapper, and skips re-pushing text the
+				// assistant message already delivered.
+				const errorText = resultErrorText(message);
+				if (errorText !== undefined) {
+					debug(`consumeQuery: error result, subtype=${message.subtype}, error=${errorText}`);
+					queryCtx.turnOutput.stopReason = "error";
+					queryCtx.turnOutput.errorMessage = errorText;
+				} else if (!queryCtx.turnSawStreamEvent && message.subtype === "success") {
 					ensureTurnStarted(queryCtx);
 					const text = message.result || "";
 					queryCtx.turnBlocks.push({ type: "text", text });
@@ -1072,6 +1090,7 @@ async function consumeQuery(
 					queryCtx.currentPiStream?.push({ type: "text_end", contentIndex: idx, content: text, partial: queryCtx.turnOutput });
 				}
 				break;
+			}
 			case "system":
 				if ((message as any).subtype === "init" && (message as any).session_id) {
 					capturedSessionId = (message as any).session_id;
@@ -1452,7 +1471,9 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 			promptStream.fail(error instanceof Error ? error : new Error(String(error)));
 			if (queryCtx.turnOutput) {
 				queryCtx.turnOutput.stopReason = options?.signal?.aborted ? "aborted" : "error";
-				queryCtx.turnOutput.errorMessage = error instanceof Error ? error.message : String(error);
+				// The SDK drops its copy of the result text if any message follows the error
+				// result, so prefer the cause consumeQuery recorded off the result itself.
+				queryCtx.turnOutput.errorMessage ??= error instanceof Error ? error.message : String(error);
 			}
 			if (!isReentrant && queryCtx.activeQuery === sdkQuery) {
 				for (const pending of queryCtx.pendingToolCalls.values()) { pending.resolve({ content: [{ type: "text", text: "Query ended" }] }); }
