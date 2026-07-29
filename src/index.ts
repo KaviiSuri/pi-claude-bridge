@@ -649,6 +649,7 @@ export const __test = {
 	finalizeCurrentStream,
 	resultErrorText,
 	deliverToolResults,
+	buildMcpServers,
 };
 
 // --- Provider helpers: tool name mapping ---
