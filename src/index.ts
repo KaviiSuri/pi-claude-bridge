@@ -683,6 +683,13 @@ function mapToolArgs(
 let piUI: ExtensionUIContext | null = null;
 const activeQueryContexts = new Set<QueryContext>();
 
+// The user's own system prompt customisation (`--system-prompt`,
+// `--append-system-prompt`), captured from before_agent_start. pi's assembled
+// `context.systemPrompt` can't be forwarded wholesale — it describes pi's tools
+// and harness and would fight Claude Code's own preset — but the user's text is
+// theirs and has to reach the model, so it is kept separately.
+let userSystemPrompt: { custom?: string; append?: string } = {};
+
 function contextForToolResults(results: McpResult[]): QueryContext | undefined {
 	for (const result of results) {
 		const id = result.toolCallId;
@@ -1295,7 +1302,11 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	const appendSystemPrompt = providerSettings.appendSystemPrompt !== false;
 	const agentsAppend = appendSystemPrompt ? extractAgentsAppend() : undefined;
 	const skillsAppend = appendSystemPrompt ? extractSkillsBlock(context.systemPrompt) : undefined;
-	const appendParts = [agentsAppend, skillsAppend].filter((part): part is string => Boolean(part));
+	// Last, so the user's own instructions win over anything the bridge adds, and
+	// ungated by appendSystemPrompt: that setting suppresses context the bridge
+	// injects on its own, not what the user explicitly asked for.
+	const appendParts = [agentsAppend, skillsAppend, userSystemPrompt.custom, userSystemPrompt.append]
+		.filter((part): part is string => Boolean(part));
 	const systemPromptAppend = appendParts.length > 0 ? appendParts.join("\n\n") : undefined;
 
 	// MCP auto-loading suppression: CC reads MCP servers from ~/.claude.json (top-level
@@ -1694,6 +1705,13 @@ export default function (pi: ExtensionAPI) {
 		if (event.reason === "new" || event.reason === "resume" || event.reason === "fork") {
 			clearSession(`session_start:${event.reason}`);
 		}
+	});
+	// `--system-prompt` replaces pi's default rather than adding to it, but Claude
+	// Code's preset carries its own tool and permission guidance that the bridge
+	// still depends on, so both flags are forwarded as an append.
+	pi.on("before_agent_start", (event) => {
+		const options = event.systemPromptOptions;
+		userSystemPrompt = { custom: options?.customPrompt, append: options?.appendSystemPrompt };
 	});
 	pi.on("session_shutdown", () => clearSession("session_shutdown"));
 

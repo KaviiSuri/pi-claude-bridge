@@ -133,16 +133,17 @@ describe("thinking block filtering", () => {
 		assert.equal(result[0].content[0].signature, "sig123");
 	});
 
-	it("Anthropic provider via api field", () => {
+	// A signature minted by another provider isn't ours to replay into Claude
+	// Code's session, so it is dropped even though the message is Anthropic's.
+	it("thinking from pi's own Anthropic provider is dropped", () => {
 		const msgs = [
-			{ role: "assistant", api: "anthropic", content: [
+			{ role: "assistant", provider: "anthropic", api: "anthropic-messages", content: [
 				{ type: "thinking", thinking: "hmm", thinkingSignature: "sig456" },
 				{ type: "text", text: "done" },
 			]},
 		];
 		const result = convert(msgs);
-		assert.equal(result[0].content.length, 2);
-		assert.equal(result[0].content[0].type, "thinking");
+		assert.deepEqual(result[0].content, [{ type: "text", text: "done" }]);
 	});
 
 	it("Anthropic provider thinking WITHOUT signature → dropped", () => {

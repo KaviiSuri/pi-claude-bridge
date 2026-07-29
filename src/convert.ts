@@ -98,9 +98,11 @@ export function convertPiMessages(
 				if (block.type === "text" && block.text) {
 					blocks.push({ type: "text", text: block.text });
 				} else if (block.type === "thinking") {
+					// Only replay thinking Claude Code itself produced. A signature minted
+					// by any other provider — including pi's own Anthropic provider — is
+					// not ours to hand back, and Anthropic rejects ones it can't verify.
 					const sig = block.thinkingSignature;
-					const isAnthropicProvider = msg.provider === PROVIDER_ID || msg.api === "anthropic";
-					if (isAnthropicProvider && sig) {
+					if (msg.provider === PROVIDER_ID && sig) {
 						blocks.push({ type: "thinking", thinking: block.thinking ?? "", signature: sig });
 					}
 				} else if (block.type === "toolCall") {
