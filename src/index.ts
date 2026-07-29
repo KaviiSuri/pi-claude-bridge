@@ -572,10 +572,20 @@ function syncSharedSession(
 			return { sessionId: sharedSession.sessionId };
 		}
 	}
+	// This is what keeps a reentrant subagent from taking over the parent's
+	// session: a subagent starts with priors of its own, shorter than the parent's
+	// cursor, so it lands here, gets a fresh session, and the ephemeral session it
+	// captures is deleted once its query completes (see preserveSharedSession in
+	// the completion handler). Remove this branch and a subagent resumes — then
+	// overwrites — the parent's session. The non-isolated AskClaude path reaches it
+	// the same way.
+	//
+	// It is NOT, despite an earlier comment here, the isolated compact-summary
+	// path: runIsolatedSummary never calls syncSharedSession at all.
+	//
 	// Only reachable when needsRebuild is false — user-facing history rewrites
 	// (/compact, session_tree, /new, fork) always set needsRebuild or clear
-	// sharedSession before the next syncSharedSession call. In practice this
-	// fires only for isolated compact-summary subprocesses.
+	// sharedSession before the next syncSharedSession call.
 	if (sharedSession && !sharedSession.needsRebuild && priorMessages.length < sharedSession.cursor) {
 		debug(`Case 1 synthetic: clean start for shorter context, preserving shared session ${sharedSession.sessionId.slice(0, 8)}, cursor=${sharedSession.cursor}`);
 		debug(`syncResult: path=clean-start preserve-shared sessionId=${sharedSession.sessionId} cursor=${sharedSession.cursor}`);
