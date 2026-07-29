@@ -74,6 +74,11 @@ export function convertPiMessages(
 ): { anthropicMessages: SessionMessage[]; sanitizedIds: Map<string, string> } {
 	const anthropicMessages = [];
 	const sanitizedIds = new Map();
+	// The user message collecting this assistant turn's tool results, if one has
+	// been emitted yet, and the index of the assistant message it belongs to. Both
+	// are cleared at every assistant message — see the toolResult branch.
+	let turnResults: { role: "user"; content: Array<Record<string, unknown>> } | null = null;
+	let turnAssistantIdx: number | null = null;
 
 	for (const msg of messages) {
 		if (msg.role === "user") {
@@ -92,6 +97,8 @@ export function convertPiMessages(
 				anthropicMessages.push({ role: "user", content: "[empty]" });
 			}
 		} else if (msg.role === "assistant") {
+			turnResults = null;
+			turnAssistantIdx = anthropicMessages.length;
 			const content = Array.isArray(msg.content) ? msg.content : [];
 			const blocks = [];
 			for (const block of content) {
@@ -113,10 +120,42 @@ export function convertPiMessages(
 			if (!blocks.length) blocks.push({ type: "text", text: "[incompatible content omitted]" });
 			anthropicMessages.push({ role: "assistant", content: blocks });
 		} else if (msg.role === "toolResult") {
-			anthropicMessages.push({
-				role: "user",
-				content: [{ type: "tool_result", tool_use_id: sanitizeToolId(msg.toolCallId, sanitizedIds), content: toolResultContent(msg.content), is_error: msg.isError }],
-			});
+			// Pi records one message per tool result, and repairToolPairing only
+			// pairs results that share the user message directly after their
+			// assistant message. Split across messages, the second and later results
+			// match no pending tool_use id: they are dropped and replaced with a
+			// synthetic "[no tool result recorded]", so every rebuild silently
+			// destroyed the output of parallel tool calls. Session.importMessages
+			// applies the repair itself, so this cannot be opted out of by skipping
+			// our own call. (Claude Code's live writer splits a turn across records
+			// — one per content block, one per result — so the single-message shape
+			// is repairToolPairing's requirement, not a copy of CC's own layout;
+			// tests/int-cc-contracts.mjs pins both facts.)
+			//
+			// Collecting into the turn's first result message rather than the
+			// immediately preceding one also handles a steer landing mid-execution,
+			// which pi records between the results (see extractAllToolResults).
+			// The results also have to sit *directly* after their assistant message:
+			// repairToolPairing consumes the turn's pending ids at the first user
+			// message that follows it, so a steer arriving before the first result —
+			// what any steer during a slow first tool looks like — would otherwise
+			// take the stubs and strand every real result behind it.
+			//
+			// Both hoists reorder the steer against wall-clock: Claude sees results
+			// that were still running when the steer arrived. Claude Code normalizes
+			// to the same order — it records a mid-turn steer as an `attachment`, and
+			// reorderAttachmentsForAPI (claude-code-rip src/utils/messages.ts:1481)
+			// bubbles attachments up to the nearest assistant or tool_result message
+			// and re-inserts them after it. The on-disk form differs, the order does not.
+			const block = { type: "tool_result", tool_use_id: sanitizeToolId(msg.toolCallId, sanitizedIds), content: toolResultContent(msg.content), is_error: msg.isError };
+			if (turnResults) {
+				turnResults.content.push(block);
+			} else {
+				turnResults = { role: "user", content: [block] };
+				// A result with no assistant message before it is malformed history;
+				// appending keeps it in order for repairToolPairing to discard.
+				anthropicMessages.splice(turnAssistantIdx === null ? anthropicMessages.length : turnAssistantIdx + 1, 0, turnResults);
+			}
 		}
 	}
 

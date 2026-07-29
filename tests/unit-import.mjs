@@ -3,6 +3,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { repairToolPairing } from "cc-session-io";
 import { sanitizeToolId, convertPiMessages } from "../src/convert.js";
 
 /** Shorthand: convert pi messages and return just the anthropic messages. */
@@ -190,7 +191,9 @@ describe("message structure", () => {
 		assert.equal(convert(msgs)[0].content[0].is_error, true);
 	});
 
-	it("multiple tool results in sequence", () => {
+	// Claude Code puts every result for one assistant turn in a single user
+	// message — see the parallel-tool-call tests below for why it matters.
+	it("merges the results of a parallel tool call into one user message", () => {
 		const msgs = [
 			{ role: "assistant", content: [
 				{ type: "toolCall", id: "t1", name: "read", arguments: { path: "a.txt" } },
@@ -200,13 +203,23 @@ describe("message structure", () => {
 			{ role: "toolResult", toolCallId: "t2", content: "content b" },
 		];
 		const result = convert(msgs);
-		assert.equal(result.length, 3);
-		assert.equal(result[0].role, "assistant");
+		assert.equal(result.length, 2);
 		assert.equal(result[0].content.length, 2);
 		assert.equal(result[1].role, "user");
-		assert.equal(result[1].content[0].tool_use_id, "t1");
-		assert.equal(result[2].role, "user");
-		assert.equal(result[2].content[0].tool_use_id, "t2");
+		assert.deepEqual(result[1].content.map((b) => [b.tool_use_id, b.content]),
+			[["t1", "content a"], ["t2", "content b"]]);
+	});
+
+	it("does not merge results across an intervening user message", () => {
+		const msgs = [
+			{ role: "assistant", content: [{ type: "toolCall", id: "t1", name: "read", arguments: {} }] },
+			{ role: "toolResult", toolCallId: "t1", content: "a" },
+			{ role: "user", content: "keep going" },
+			{ role: "assistant", content: [{ type: "toolCall", id: "t2", name: "read", arguments: {} }] },
+			{ role: "toolResult", toolCallId: "t2", content: "b" },
+		];
+		assert.deepEqual(convert(msgs).map((m) => m.role),
+			["assistant", "user", "user", "assistant", "user"]);
 	});
 
 	it("mixed conversation: user → assistant(tool) → toolResult → assistant(text)", () => {
@@ -319,5 +332,73 @@ describe("message structure", () => {
 		assert.deepEqual(result, [
 			{ type: "image", source: { type: "base64", media_type: "image/png", data: "BASE64DATA" } },
 		]);
+	});
+});
+
+// Every rebuild runs the conversion through repairToolPairing — once here, once
+// more inside Session.importMessages. It only pairs results that sit in the user
+// message directly after their assistant message, so anything the conversion
+// leaves in a later message is dropped and replaced with a synthetic
+// "[no tool result recorded]" error. That silently destroyed the output of every
+// parallel tool call in the rebuilt session.
+describe("conversion survives repairToolPairing", () => {
+	const parallelCall = (n) => {
+		const ids = Array.from({ length: n }, (_, i) => `t${i}`);
+		return [
+			{ role: "user", content: "read them all" },
+			{ role: "assistant", content: ids.map((id) => ({ type: "toolCall", id, name: "read", arguments: { path: `${id}.txt` } })) },
+			...ids.map((id) => ({ role: "toolResult", toolCallId: id, content: `body of ${id}` })),
+		];
+	};
+
+	it("keeps every result of a parallel tool call", () => {
+		const converted = convert(parallelCall(3));
+		const repaired = repairToolPairing(converted);
+
+		assert.deepEqual(repaired, converted);
+		const results = repaired.flatMap((m) => (Array.isArray(m.content) ? m.content : [])).filter((b) => b.type === "tool_result");
+		assert.deepEqual(results.map((b) => b.content), ["body of t0", "body of t1", "body of t2"]);
+	});
+
+	// Mid-turn steering puts a user message between the results (which is why
+	// extractAllToolResults walks past them), so adjacency alone is not enough to
+	// keep a parallel call together. CC writes the same turn as results-then-steer.
+	it("collects results that a steer interleaved, keeping the steer after them", () => {
+		const msgs = [
+			{ role: "assistant", content: [{ type: "toolCall", id: "t0", name: "read", arguments: {} }, { type: "toolCall", id: "t1", name: "read", arguments: {} }] },
+			{ role: "toolResult", toolCallId: "t0", content: "first" },
+			{ role: "user", content: "actually, also check X" },
+			{ role: "toolResult", toolCallId: "t1", content: "second" },
+		];
+		const repaired = repairToolPairing(convert(msgs));
+
+		assert.deepEqual(repaired.map((m) => m.role), ["assistant", "user", "user"]);
+		assert.deepEqual(repaired[1].content.map((b) => b.content), ["first", "second"]);
+		assert.equal(repaired[2].content, "actually, also check X");
+	});
+
+	// A steer sent while the first tool is still running lands in pi's history
+	// before any result. repairToolPairing hands the turn's stubs to the first user
+	// message after the assistant, so the results have to be inserted ahead of it.
+	it("collects results that a steer preceded", () => {
+		const msgs = [
+			{ role: "assistant", content: [{ type: "toolCall", id: "t0", name: "read", arguments: {} }, { type: "toolCall", id: "t1", name: "read", arguments: {} }] },
+			{ role: "user", content: "actually stop and check X" },
+			{ role: "toolResult", toolCallId: "t0", content: "first" },
+			{ role: "toolResult", toolCallId: "t1", content: "second" },
+		];
+		const repaired = repairToolPairing(convert(msgs));
+
+		assert.deepEqual(repaired.map((m) => m.role), ["assistant", "user", "user"]);
+		assert.deepEqual(repaired[1].content.map((b) => b.content), ["first", "second"]);
+		assert.equal(repaired[2].content, "actually stop and check X");
+	});
+
+	it("leaves no synthetic result stubs behind", () => {
+		const repaired = repairToolPairing(convert(parallelCall(5)));
+
+		const stubs = repaired.flatMap((m) => (Array.isArray(m.content) ? m.content : []))
+			.filter((b) => b.type === "tool_result" && typeof b.content === "string" && b.content.includes("no tool result recorded"));
+		assert.deepEqual(stubs, []);
 	});
 });
