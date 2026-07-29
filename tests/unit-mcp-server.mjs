@@ -79,6 +79,18 @@ async function connectClient(server) {
 describe("MCP tool schema advertisement", () => {
 	let listed;
 
+	// A non-object schema typechecks (pi types parameters as any TypeBox schema)
+	// but cannot go on the wire. Advertising it as "no arguments" instead would
+	// surface much later as pi rejecting the arguments Claude did not send.
+	it("rejects a non-object parameter schema at construction, naming the tool", () => {
+		assert.throws(
+			() => createToolServer("custom-tools", [
+				{ name: "bad_tool", description: "", inputSchema: { type: "string" }, handler: async () => ({ content: [] }) },
+			]),
+			/bad_tool: MCP tool parameters must be an object schema/,
+		);
+	});
+
 	before(async () => {
 		const server = createToolServer("custom-tools", [
 			{

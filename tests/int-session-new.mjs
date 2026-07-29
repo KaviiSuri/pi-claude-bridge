@@ -25,9 +25,9 @@ await startAndWait();
 
 try {
 	console.log("Turn 1: seed history...");
-	await promptAndWait("Pick a number between 1 and 100 and remember it. Reply with just the number.");
+	await promptAndWait("Pick a number between 1 and 100 and remember it. Reply with just the number. Do not use the memory system.");
 	console.log("Turn 2: more history...");
-	await promptAndWait("Now pick a color. Reply with just the color.");
+	await promptAndWait("Now pick a color. Reply with just the color. Do not use the memory system.");
 
 	const NEW_MARKER_LOG = readFileSync(DEBUG_LOG, "utf8").length;
 

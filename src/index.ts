@@ -1,7 +1,7 @@
 import { calculateCost, StringEnum, type AssistantMessage, type AssistantMessageEventStream, type Context, type ImageContent, type Model, type SimpleStreamOptions, type TextContent, type Tool, type UserMessage } from "@earendil-works/pi-ai";
 import * as piAi from "@earendil-works/pi-ai";
 import { getModels } from "@earendil-works/pi-ai/compat";
-import { buildSessionContext, compact, keyHint, type CompactionEntry, type ExtensionAPI, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import { buildSessionContext, compact, keyHint, type CompactionEntry, type ExtensionAPI, type ExtensionContext, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { query, type EffortLevel, type SDKMessage, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
 import type { Base64ImageSource, ContentBlockParam } from "@anthropic-ai/sdk/resources";
 import { Type } from "typebox";
@@ -341,7 +341,7 @@ function extractIsolatedSummaryPrompt(messages: Context["messages"]): string {
 function resultErrorText(message: SDKMessage): string | undefined {
 	const result = message as SDKMessage & { subtype?: string; is_error?: boolean; result?: string; errors?: unknown; error?: unknown };
 	if (result.subtype === "success") return result.is_error ? result.result || "Claude Code reported an error" : undefined;
-	if (Array.isArray(result.errors)) return result.errors.map(String).join("\n");
+	if (Array.isArray(result.errors) && result.errors.length) return result.errors.map(String).join("\n");
 	if (typeof result.error === "string") return result.error;
 	return `Claude Code failed: ${result.subtype ?? "unknown result"}`;
 }
@@ -636,6 +636,7 @@ export const __test = {
 	consumeQuery,
 	finalizeCurrentStream,
 	resultErrorText,
+	deliverToolResults,
 };
 
 // --- Provider helpers: tool name mapping ---
@@ -685,7 +686,27 @@ function mapToolArgs(
 
 // Global (not query state):
 let piUI: ExtensionUIContext | null = null;
+let piMode: ExtensionContext["mode"] | null = null;
 const activeQueryContexts = new Set<QueryContext>();
+
+// `plan` is the one setting whose default silently costs the user something (no
+// Opus 1M on Max), so announce it once. Deferred to the first bridge query
+// rather than session_start: the notice persists a flag to the global config,
+// and firing it on startup would write that file for every pi session that
+// merely has this extension installed.
+let planNoticePending = false;
+
+function showPlanNoticeOnce(): void {
+	// `hasUI` is true in RPC mode too — it means dialogs are possible, not that a
+	// human is watching. Only a terminal user can act on this.
+	if (!planNoticePending || piMode !== "tui") return;
+	planNoticePending = false;
+	const path = markStartupNoticeShown();
+	piUI?.notify(
+		`Claude bridge: assuming a Pro plan. On Max (or Team Premium/Enterprise), set provider.plan to "max" in ${path} to unlock Opus at 1M context.`,
+		"info",
+	);
+}
 
 // The user's own system prompt customisation (`--system-prompt`,
 // `--append-system-prompt`), captured from before_agent_start. pi's assembled
@@ -1211,6 +1232,7 @@ async function deliverToolResults(
 /** Provider entry point. Pi calls this for each new prompt and each tool result.
  *  Two cases: tool result delivery (active query) or fresh query. */
 function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
+	showPlanNoticeOnce();
 	const stream = newAssistantMessageEventStream();
 
 	// DEBUG: trace followUp message triggering
@@ -1695,9 +1717,7 @@ export default function (pi: ExtensionAPI) {
 	};
 	const registeredModels = applyLongContext(MODELS, longContextSettings);
 
-	// `plan` is the one setting whose default silently costs the user something
-	// (no Opus 1M on Max), so announce it once.
-	let planNoticePending = config.provider?.plan === undefined && !config.startupNoticeShown;
+	planNoticePending = config.provider?.plan === undefined && !config.startupNoticeShown;
 
 	// Reset shared session on pi session lifecycle events
 	const clearSession = (event: string) => {
@@ -1715,14 +1735,7 @@ export default function (pi: ExtensionAPI) {
 	};
 	pi.on("session_start", (event, ctx) => {
 		piUI = ctx.ui;
-		if (planNoticePending && ctx.hasUI) {
-			planNoticePending = false;
-			const path = markStartupNoticeShown();
-			ctx.ui.notify(
-				`Claude bridge: assuming a Pro plan. On Max (or Team Premium/Enterprise), set provider.plan to "max" in ${path} to unlock Opus at 1M context.`,
-				"info",
-			);
-		}
+		piMode = ctx.mode;
 		if (event.reason === "new" || event.reason === "resume" || event.reason === "fork") {
 			clearSession(`session_start:${event.reason}`);
 		}

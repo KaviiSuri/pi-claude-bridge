@@ -4,6 +4,17 @@
 
 set -euo pipefail
 
+# Auto-load .env.test so these scripts work when invoked directly and not just via
+# `npm test`, which sources it for the whole chain. Mirrors tests/lib/rpc-harness.mjs,
+# which already does this for the .mjs tests.
+__ENV_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/.env.test"
+if [[ -f "$__ENV_FILE" ]]; then
+	set -a
+	# shellcheck disable=SC1090
+	source "$__ENV_FILE"
+	set +a
+fi
+
 # Strip node_modules/.bin from PATH so we use the system pi, not the vendored one.
 __clean_path() {
 	echo "$PATH" | tr ':' '\n' | grep -v node_modules | tr '\n' ':'

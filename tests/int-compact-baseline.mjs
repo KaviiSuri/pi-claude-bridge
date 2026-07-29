@@ -32,9 +32,9 @@ await startAndWait();
 
 try {
 	console.log("Seed: a few short turns so there is history to compact...");
-	await promptAndWait("Pick a number between 1 and 100 and remember it. Reply with just the number.");
-	await promptAndWait("Now pick a color. Reply with just the color.");
-	await promptAndWait("Now pick a fruit. Reply with just the fruit.");
+	await promptAndWait("Pick a number between 1 and 100 and remember it. Reply with just the number. Do not use the memory system.");
+	await promptAndWait("Now pick a color. Reply with just the color. Do not use the memory system.");
+	await promptAndWait("Now pick a fruit. Reply with just the fruit. Do not use the memory system.");
 
 	console.log("Triggering /compact...");
 	const compactResult = await send({ type: "compact" }, TIMEOUT);

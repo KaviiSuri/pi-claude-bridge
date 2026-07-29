@@ -43,24 +43,31 @@ export function makePromptStream(): PromptStream {
 	const kick = () => { wake?.(); wake = null; };
 
 	async function* gen(): AsyncGenerator<SDKUserMessage> {
-		while (true) {
-			while (queue.length === 0 && !done && !failure) {
-				await new Promise<void>((resolve) => { wake = resolve; });
+		try {
+			while (true) {
+				while (queue.length === 0 && !done && !failure) {
+					await new Promise<void>((resolve) => { wake = resolve; });
+				}
+				if (failure) throw failure;
+				const item = queue.shift();
+				if (!item) return; // ended and drained
+				inflight = item;
+				try {
+					yield item.msg;
+					item.resolve();
+				} finally {
+					// Reached either normally (no-op, already resolved) or when the
+					// pump abandons iteration — a `for await` break/throw calls
+					// gen.return(), which resumes the yield as a return.
+					item.reject(new Error("prompt stream closed"));
+					inflight = null;
+				}
 			}
-			if (failure) throw failure;
-			const item = queue.shift();
-			if (!item) return; // ended and drained
-			inflight = item;
-			try {
-				yield item.msg;
-				item.resolve();
-			} finally {
-				// Reached either normally (no-op, already resolved) or when the
-				// pump abandons iteration — a `for await` break/throw calls
-				// gen.return(), which resumes the yield as a return.
-				item.reject(new Error("prompt stream closed"));
-				inflight = null;
-			}
+		} finally {
+			// No consumer left to drain the queue, so nothing would ever settle a
+			// later push. Closing here keeps the reject-never-hang contract a
+			// property of this module rather than of every call site.
+			done = true;
 		}
 	}
 
@@ -71,6 +78,10 @@ export function makePromptStream(): PromptStream {
 			: new Promise<void>((resolve, reject) => { queue.push({ msg, resolve, reject }); kick(); }),
 		end: () => { done = true; kick(); },
 		fail: (error) => {
+			// First failure wins: the query's `finally` fails the stream a second
+			// time with a generic "query ended", which would otherwise mask the
+			// real cause its `catch` recorded.
+			if (failure) return;
 			failure = error;
 			queue.splice(0).forEach((item) => item.reject(error));
 			inflight?.reject(error);

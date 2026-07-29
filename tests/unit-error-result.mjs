@@ -10,7 +10,7 @@ import { QueryContext } from "../src/query-state.js";
 
 const { __test } = await import("../src/index.js");
 
-const fakeModel = { api: "anthropic", provider: "anthropic", id: "test-model" };
+const fakeModel = { api: "anthropic-messages", provider: "anthropic", id: "test-model" };
 
 function fakeStream() {
 	const events = [];
@@ -53,6 +53,9 @@ describe("resultErrorText", () => {
 	it("never returns an empty message for a failure", () => {
 		assert.ok(__test.resultErrorText({ type: "result", subtype: "success", is_error: true, result: "" }));
 		assert.ok(__test.resultErrorText({ type: "result", subtype: "error_max_budget_usd" }));
+		// errors[] is typed string[], with no promise of being non-empty; joining an
+		// empty one marks the turn errored with nothing to show the user.
+		assert.ok(__test.resultErrorText({ type: "result", subtype: "error_during_execution", errors: [] }));
 	});
 });
 

@@ -44,25 +44,28 @@ export interface McpToolDef {
 	handler: (toolCallId: string) => Promise<McpResult>;
 }
 
-const EMPTY_SCHEMA = { type: "object", properties: {} };
-
-// Tool parameters come from arbitrary pi extensions; MCP requires an object
-// schema, so anything else is advertised as taking no arguments rather than
-// being put on the wire malformed.
-function toInputSchema(schema: unknown): Record<string, unknown> {
-	const s = schema as Record<string, unknown> | undefined;
-	return s && s.type === "object" && s.properties ? s : EMPTY_SCHEMA;
+// MCP requires an object schema. Pi types tool parameters as any TypeBox schema,
+// so a scalar or array one typechecks but cannot go on the wire — that is a bug
+// in the tool, and reporting it at startup names the culprit. Degrading it to
+// "takes no arguments" instead would surface much later as Claude calling the
+// tool with no arguments and pi's own validation rejecting them.
+function assertObjectSchema(tool: McpToolDef): void {
+	const schema = tool.inputSchema as Record<string, unknown> | undefined;
+	if (!schema || schema.type !== "object") {
+		throw new Error(`${tool.name}: MCP tool parameters must be an object schema, got ${JSON.stringify(schema)}`);
+	}
 }
 
 export function createToolServer(name: string, tools: McpToolDef[]) {
 	const server = new McpServer({ name, version: "1.0.0" }, { capabilities: { tools: {} } });
 	const byName = new Map(tools.map((tool) => [tool.name, tool]));
+	for (const tool of tools) assertObjectSchema(tool);
 
 	server.server.setRequestHandler(ListToolsRequestSchema, () => ({
 		tools: tools.map((tool) => ({
 			name: tool.name,
 			description: tool.description,
-			inputSchema: toInputSchema(tool.inputSchema),
+			inputSchema: tool.inputSchema as Record<string, unknown>,
 		})),
 	}));
 

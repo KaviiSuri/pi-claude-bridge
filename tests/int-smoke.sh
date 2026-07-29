@@ -82,8 +82,11 @@ run "system prompt: --system-prompt reaches Claude" \
     -p 'What is 2+2? Answer in one short sentence.' 2>&1 | grep -q ARRR && echo ok"
 
 # AskClaude only registers when a non-claude-bridge provider is active
+# The prompt must not name the tool: --mode json echoes the user message into the
+# same stream we grep. Asking for an exact, complete enumeration matters — a vague
+# "list your tools" lets the model summarise and drop the custom tool intermittently.
 run "tool: AskClaude registered" \
-  bash -c "pi --no-session -ne -e '$DIR' --mode json --provider '$ALT_PROVIDER' --model '$ALT_MODEL' -p 'list your tools' 2>&1 | grep -q AskClaude && echo ok"
+  bash -c "pi --no-session -ne -e '$DIR' --mode json --provider '$ALT_PROVIDER' --model '$ALT_MODEL' -p 'List the exact name of every tool you have, one per line, and nothing else.' 2>&1 | grep -q AskClaude && echo ok"
 
 # AskClaude e2e: force a non-Claude model to call the tool and check for a tool result
 run "tool: AskClaude responds" \
