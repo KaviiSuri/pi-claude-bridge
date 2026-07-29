@@ -28,12 +28,10 @@ describe("QueryContext class", () => {
 		assert.strictEqual(ctx().turnBlocks, ctx().turnOutput.content);
 	});
 
-	it("resetTurnState preserves turnToolCallIds and nextHandlerIdx", () => {
+	it("resetTurnState preserves turnToolCallIds", () => {
 		ctx().turnToolCallIds = ["id1", "id2"];
-		ctx().nextHandlerIdx = 5;
 		ctx().resetTurnState(fakeModel);
 
 		assert.deepStrictEqual(ctx().turnToolCallIds, ["id1", "id2"]);
-		assert.strictEqual(ctx().nextHandlerIdx, 5);
 	});
 });
