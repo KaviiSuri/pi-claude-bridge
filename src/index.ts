@@ -16,7 +16,7 @@ import { MCP_SERVER_NAME, MCP_TOOL_PREFIX, extractSkillsBlock } from "./skills.j
 import { verifyWrittenSession as _verifyWrittenSession } from "./session-verify.js";
 import { extractAllToolResults as _extractAllToolResults, type McpResult } from "./extract-tool-results.js";
 import { QueryContext, ctx } from "./query-state.js";
-import { makePromptStream, userMessage } from "./prompt-stream.js";
+import { makePromptStream, userMessage, type PromptStream } from "./prompt-stream.js";
 import { loadConfig, markStartupNoticeShown, type Config } from "./config.js";
 import { extractAgentsAppend } from "./agents-md.js";
 import { createToolServer } from "./mcp-server.js";
@@ -649,6 +649,7 @@ export const __test = {
 	finalizeCurrentStream,
 	resultErrorText,
 	deliverToolResults,
+	drainForAbort,
 	buildMcpServers,
 };
 
@@ -1274,6 +1275,15 @@ async function deliverToolResults(
 	}
 }
 
+/** Abort teardown for one query: settle everything that would otherwise be left
+ *  awaiting a subprocess we are about to kill. The pump abandons iteration on
+ *  abort, so an in-flight prompt-stream push would hang forever and take
+ *  tool-result delivery with it. */
+function drainForAbort(c: QueryContext, promptStream: PromptStream): void {
+	promptStream.fail(new Error("Operation aborted"));
+	c.releasePendingToolCalls("Operation aborted");
+}
+
 /** Provider entry point. Pi calls this for each new prompt and each tool result.
  *  Two cases: tool result delivery (active query) or fresh query. */
 function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
@@ -1481,13 +1491,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	};
 	const onAbort = () => {
 		wasAborted = true;
-		// Terminate the input generator and settle its acks — the pump abandons
-		// iteration on abort, so an in-flight push would otherwise hang forever
-		// and take tool-result delivery with it.
-		promptStream.fail(new Error("Operation aborted"));
-		for (const pending of abortCtx.pendingToolCalls.values()) { pending.resolve({ content: [{ type: "text", text: "Operation aborted" }] }); }
-		abortCtx.pendingToolCalls.clear();
-		abortCtx.pendingResults.clear();
+		drainForAbort(abortCtx, promptStream);
 		requestAbort();
 	};
 	if (options?.signal) {
@@ -1551,9 +1555,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 				queryCtx.turnOutput.errorMessage ??= error instanceof Error ? error.message : String(error);
 			}
 			if (!isReentrant && queryCtx.activeQuery === sdkQuery) {
-				for (const pending of queryCtx.pendingToolCalls.values()) { pending.resolve({ content: [{ type: "text", text: "Query ended" }] }); }
-				queryCtx.pendingToolCalls.clear();
-				queryCtx.pendingResults.clear();
+				queryCtx.releasePendingToolCalls("Query ended");
 				debug("provider: clearing activeQuery before error stream completion");
 				queryCtx.activeQuery = null;
 			}
@@ -1571,10 +1573,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 			promptStream.fail(new Error("query ended"));
 			if (queryCtx.promptStream === promptStream) queryCtx.promptStream = null;
 			if (queryCtx.activeQuery === sdkQuery) {
-				// Drain pending handlers for this query
-				for (const pending of queryCtx.pendingToolCalls.values()) { pending.resolve({ content: [{ type: "text", text: "Query ended" }] }); }
-				queryCtx.pendingToolCalls.clear();
-				queryCtx.pendingResults.clear();
+				queryCtx.releasePendingToolCalls("Query ended");
 				queryCtx.activeQuery = null;
 				// Guarded like the two cleanups above: if a later query has already
 				// claimed this context, removing it from the routing set would send

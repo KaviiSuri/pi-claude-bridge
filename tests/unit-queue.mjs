@@ -17,6 +17,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { QueryContext } from "../src/query-state.js";
 import { extractAllToolResults } from "../src/extract-tool-results.js";
+import { makePromptStream } from "../src/prompt-stream.js";
 
 const { __test } = await import("../src/index.js");
 
@@ -156,6 +157,51 @@ describe("tool result queue", () => {
 
 		assert.equal(replyText(await answered), "r1");
 		assert.deepEqual([...c.pendingToolCalls.keys()], ["toolu_2"]);
+	});
+});
+
+// The other way a handler leaves the queue: not answered, abandoned. Every exit
+// from a query (abort, error, normal end) has to settle its handlers, because
+// CC's tools/call stays open until we reply and pi's turn waits behind it.
+describe("abandoning a query", () => {
+	it("answers every parked handler and forgets queued results", async () => {
+		const { c, callTool } = await startQuery(["toolu_1", "toolu_2", "toolu_3"]);
+		const one = callTool("alpha", "toolu_1");
+		const two = callTool("beta", "toolu_2");
+		await tick();
+		await deliver(c, result("toolu_3", "r3")); // queued, no handler ever came
+
+		c.releasePendingToolCalls("Query ended");
+
+		assert.equal(replyText(await one), "Query ended");
+		assert.equal(replyText(await two), "Query ended");
+		assert.equal(c.pendingToolCalls.size, 0);
+		assert.equal(c.pendingResults.size, 0, "a result nobody claimed must not outlive its query");
+	});
+
+	// The abort race: the user aborts while delivery is parked on the steer's
+	// stdin ack. failing the prompt stream is what unwedges that await — without
+	// it the ack never settles, delivery never returns, and the handler it was
+	// about to release waits forever on a subprocess that is already dead.
+	// Timeout, not just assertions: the failure mode is a hang, and node's default
+	// is to wait forever.
+	it("unwedges a delivery parked on the steer ack, leaving no handler waiting", { timeout: 5000 }, async () => {
+		const { c, callTool } = await startQuery(["toolu_1"]);
+		const call = callTool("alpha", "toolu_1");
+		await tick();
+
+		// Real stream, no consumer: the push parks exactly as it does when the CLI
+		// stops reading stdin.
+		c.promptStream = makePromptStream();
+		const delivery = __test.deliverToolResults(c, [result("toolu_1", "r1")], [{ type: "text", text: "stop" }], 4);
+		await tick();
+		assert.equal(c.pendingToolCalls.size, 1, "delivery must still be parked on the ack");
+
+		__test.drainForAbort(c, c.promptStream);
+
+		await delivery; // resolves rather than throwing: the steer is lost, not the turn
+		assert.equal(replyText(await call), "Operation aborted");
+		assert.equal(c.pendingToolCalls.size, 0);
 	});
 });
 
