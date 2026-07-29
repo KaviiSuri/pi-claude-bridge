@@ -1097,10 +1097,42 @@ async function consumeQuery(
 
 	for await (const message of sdkQuery) {
 		if (wasAborted()) break;
-		// Ahead of the currentPiStream guard: nothing else closes the CLI's stdin
-		// now that the prompt is a streamed generator (isSingleUserTurn=false), so
-		// missing this would hang the query forever.
-		if (message.type === "result") queryCtx.promptStream?.end();
+		// Everything below the currentPiStream guard is content, which there is
+		// nowhere to put once a turn has ended on a tool call. These three are not
+		// content and must not share that gate:
+		//
+		// - stdin: nothing else closes the CLI's stdin now that the prompt is a
+		//   streamed generator (isSingleUserTurn=false), so missing this hangs the query.
+		// - the failure a `result` carries: it is the only record that the turn
+		//   failed at all. Behind the guard, a 429 arriving at a tool boundary set
+		//   no stopReason, no errorMessage, and logged nothing — the turn simply
+		//   ended empty.
+		// - rate-limit events: notifications to the user, which are most likely to
+		//   fire during exactly the long tool-using turns the guard was skipping.
+		let resultError: string | undefined;
+		if (message.type === "result") {
+			queryCtx.promptStream?.end();
+			logServedContextWindow("result", message, model);
+			resultError = resultErrorText(message);
+			if (resultError !== undefined) {
+				debug(`consumeQuery: error result, subtype=${message.subtype}, error=${resultError}`);
+				if (queryCtx.turnOutput) {
+					queryCtx.turnOutput.stopReason = "error";
+					queryCtx.turnOutput.errorMessage = resultError;
+				}
+			}
+		}
+		if (message.type === "rate_limit_event") {
+			const info = (message as any).rate_limit_info;
+			debug("consumeQuery: rate_limit_event", JSON.stringify(info).slice(0, 300));
+			if (info?.status === "rejected") {
+				const resetsAt = info.resetsAt ? new Date(info.resetsAt).toLocaleTimeString() : "unknown";
+				piUI?.notify(`Claude rate limited (${info.rateLimitType ?? "unknown"}) — resets at ${resetsAt}`, "warning");
+			} else if (info?.status === "allowed_warning") {
+				piUI?.notify(`Claude rate limit warning: ${Math.round(info.utilization ?? 0)}% used (${info.rateLimitType ?? ""})`, "warning");
+			}
+			continue;
+		}
 		if (!queryCtx.currentPiStream || !queryCtx.turnOutput) continue;
 
 		switch (message.type) {
@@ -1111,18 +1143,10 @@ async function consumeQuery(
 				processAssistantMessage(message, model, customToolNameToPi, queryCtx);
 				break;
 			case "result": {
-				logServedContextWindow("result", message, model);
-				// CC streams the failure text as a <synthetic> assistant message before the
-				// result, then exits non-zero — so the SDK generator rejects and the provider's
-				// catch path finishes the turn. Recording the cause here keeps the API's own
-				// message instead of the SDK's generic wrapper, and skips re-pushing text the
-				// assistant message already delivered.
-				const errorText = resultErrorText(message);
-				if (errorText !== undefined) {
-					debug(`consumeQuery: error result, subtype=${message.subtype}, error=${errorText}`);
-					queryCtx.turnOutput.stopReason = "error";
-					queryCtx.turnOutput.errorMessage = errorText;
-				} else if (!queryCtx.turnSawStreamEvent && message.subtype === "success") {
+					// The failure itself was recorded above the guard, along with the served
+					// context window. What is left here is the success path: push the result
+					// text when no assistant message already delivered it.
+					if (resultError === undefined && !queryCtx.turnSawStreamEvent && message.subtype === "success") {
 					ensureTurnStarted(queryCtx);
 					const text = message.result || "";
 					queryCtx.turnBlocks.push({ type: "text", text });
@@ -1146,17 +1170,6 @@ async function consumeQuery(
 				// is why the mid-turn steering tripwire has to live in the
 				// integration test.
 				break;
-			case "rate_limit_event": {
-				const info = (message as any).rate_limit_info;
-				debug("consumeQuery: rate_limit_event", JSON.stringify(info).slice(0, 300));
-				if (info?.status === "rejected") {
-					const resetsAt = info.resetsAt ? new Date(info.resetsAt).toLocaleTimeString() : "unknown";
-					piUI?.notify(`Claude rate limited (${info.rateLimitType ?? "unknown"}) — resets at ${resetsAt}`, "warning");
-				} else if (info?.status === "allowed_warning") {
-					piUI?.notify(`Claude rate limit warning: ${Math.round(info.utilization ?? 0)}% used (${info.rateLimitType ?? ""})`, "warning");
-				}
-				break;
-			}
 			default:
 				debug("consumeQuery: unhandled SDK message type", message.type);
 				break;

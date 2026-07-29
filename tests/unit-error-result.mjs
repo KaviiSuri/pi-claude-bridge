@@ -99,6 +99,20 @@ describe("error results", () => {
 		assert.strictEqual(stream.events.at(-2).type, "done");
 	});
 
+	// A turn that ended on a tool call has already closed its pi stream, and the
+	// guard that suppresses content events for a closed stream used to swallow the
+	// result message with it — so a 429 mid-tool set no stopReason, no
+	// errorMessage, and logged nothing at all.
+	it("records a failure that arrives after the turn ended on a tool call", async () => {
+		const c = makeCtx();
+		c.currentPiStream = null; // what the tool boundary leaves behind
+
+		await consume(c, [errorResult]);
+
+		assert.strictEqual(c.turnOutput.stopReason, "error");
+		assert.strictEqual(c.turnOutput.errorMessage, errorResult.result);
+	});
+
 	it("reports the dedicated error subtypes", async () => {
 		const c = makeCtx();
 		await consume(c, [{ type: "result", subtype: "error_max_turns", is_error: true, errors: ["hit the cap"] }]);
