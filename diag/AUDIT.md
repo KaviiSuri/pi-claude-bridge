@@ -407,25 +407,39 @@ exact matches, 1,033 results-ahead-of-handler (normal, they park in
 
 One incident class lives in the cc-cli logs and has no scanner yet.
 
-**Orphaned Claude Code subprocess after the pi process dies.** When pi goes away
-mid-turn its CC child is not killed. Every subsequent MCP call fails instantly
-with `Stream closed` (the transport is gone), CC treats that as a normal tool
-error, feeds it to the model, and issues another API request — forever.
+**Orphaned Claude Code subprocess — trigger unknown.** A CC child outlived its pi
+session and kept working: every MCP call failed instantly with `Stream closed`
+(the transport was gone), CC treated that as a normal tool error, fed it to the
+model, and issued another API request — for the better part of an hour.
 
 | # | cc-cli log | onset | end | `Stream closed` | API requests | stopped by |
 |---|---|---|---|---|---|---|
 | A | `2026-07-10T22-48-21-609Z-provider-1.log:474` | 23:08:21 | 00:07:30 | 1,396 | 1,416 | LSP shutdown, 59 min |
 | B | `2026-06-03T20-19-06-231Z-provider-1.log:422` | 20:24:12 | 20:42:08 | 356 | 375 | **429 rate_limit_error**, 23 min |
 
-All failures are `after 0s`. Incident A's trigger is one line earlier:
-`Tool 'bash' failed after 1s: Tool permission stream closed before response
-received`. Incident B consumed enough quota to trip the account rate limit, which
-would have hit the user's other sessions. Bridge-side, both processes' last log
-line precedes the storm (`claude-bridge.log:48337` for A, `:29487` for B).
+All failures are `after 0s`. Incident B consumed enough quota to trip the account
+rate limit, which would have hit the user's other sessions. Bridge-side, both
+processes' last log line precedes the storm (`claude-bridge.log:48337` for A,
+`:29487` for B).
 
-Confirm by killing a pi process mid-tool-call and watching whether the `claude`
-child keeps issuing `/v1/messages`. Fix shape: tie the query's `AbortController`
-to pi's process lifetime, and cap consecutive tool failures.
+**"After the pi process dies" was this section's first guess and it is wrong.**
+`tests/int-shutdown-kills-cc.mjs` drives both reachable triggers against the
+installed CC/SDK and the child dies within a second either way: pi exiting closes
+the child's stdin, which CC treats as EOF even with a tool call parked, and a user
+abort fails the prompt stream and then interrupts and closes the query. So both
+incidents needed a third condition that leaves pi *alive* with its control channel
+closed — the child is only unreapable while the pi process still holds it.
+
+What the timeline does say, for incident A: pi logged `mcp handler: bash
+[toolu_01MVF…] → waiting` at 23:08:17.766 and never logged again, and CC failed
+that same dispatch `outcome=error durationMs=1215` 1.2 s later, then re-issued the
+call under a fresh id. CC's log runs continuously for the next 59 minutes with no
+timestamp gap, so the machine was awake and pi was not merely suspended. Both
+incidents predate the July 2026 tool-loop fixes (122914dd, 7ff04fd2, 549bab95,
+da8513b5), there are exactly two in 1,159 cc-cli logs, none since 2026-07-10, and
+the distribution is binary — no log has between 1 and 5 `Stream closed` failures.
+That is consistent with an already-fixed cause, which is why nothing is being
+built for it; the two tests are the tripwire if it returns.
 
 Also unscanned: **thinking blocks dropped for want of a signature**.
 `src/index.ts:1056` stores `thinkingSignature: block.signature ?? ""` and

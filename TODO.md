@@ -16,12 +16,18 @@ scanners with `--since <date of last good run>` before assuming any of it is sta
   repro on a session file CC wrote entirely itself. See `diag/AUDIT.md` →
   "Finding: ~28% of `--resume` boundaries".
 
-- **Orphaned Claude Code subprocess after the pi process dies**: the CC child is
-  not killed, every MCP call then fails `Stream closed`, CC feeds that to the
-  model as a tool error and issues another API request — forever. Two observed
-  incidents ran 59 and 23 minutes; the second tripped an account-wide 429. Fix
-  shape: tie the query's `AbortController` to pi's process lifetime, and cap
-  consecutive tool failures. See `diag/AUDIT.md` → "Not covered by these scripts".
+- **Orphaned Claude Code subprocess, trigger unknown**: a CC child outlived its
+  pi session and burned API requests for 59 minutes (a second incident ran 23 and
+  tripped an account-wide 429). Probed rather than assumed:
+  `tests/int-shutdown-kills-cc.mjs` shows both reachable triggers already reap the
+  child — pi exiting closes its stdin, which CC honours even mid-tool-call, and a
+  user abort interrupts and closes the query. So the incidents needed a third
+  condition that leaves pi alive with its control channel closed, and there is
+  nothing to fix on the paths we can reach. Both predate the July 2026 tool-loop
+  fixes, there are two in 1,159 cc-cli logs, none since 2026-07-10, and no log has
+  between 1 and 5 failures — likely already fixed. The two tests are the tripwire;
+  reopen this only if one goes red or a third storm appears.
+  See `diag/AUDIT.md` → "Not covered by these scripts".
 
 - **4 stranded MCP handlers and 7 orphan queued results remain unexplained**
   (out of 32 and 14; the rest are accounted for by abort/shutdown or the
