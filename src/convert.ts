@@ -74,6 +74,9 @@ export function convertPiMessages(
 ): { anthropicMessages: SessionMessage[]; sanitizedIds: Map<string, string> } {
 	const anthropicMessages = [];
 	const sanitizedIds = new Map();
+	// The user message collecting this assistant turn's tool results, if one has
+	// been emitted yet. Cleared at every assistant message — see the toolResult branch.
+	let turnResults: { role: string; content: Array<Record<string, unknown>> } | null = null;
 
 	for (const msg of messages) {
 		if (msg.role === "user") {
@@ -92,6 +95,7 @@ export function convertPiMessages(
 				anthropicMessages.push({ role: "user", content: "[empty]" });
 			}
 		} else if (msg.role === "assistant") {
+			turnResults = null;
 			const content = Array.isArray(msg.content) ? msg.content : [];
 			const blocks = [];
 			for (const block of content) {
@@ -113,10 +117,26 @@ export function convertPiMessages(
 			if (!blocks.length) blocks.push({ type: "text", text: "[incompatible content omitted]" });
 			anthropicMessages.push({ role: "assistant", content: blocks });
 		} else if (msg.role === "toolResult") {
-			anthropicMessages.push({
-				role: "user",
-				content: [{ type: "tool_result", tool_use_id: sanitizeToolId(msg.toolCallId, sanitizedIds), content: toolResultContent(msg.content), is_error: msg.isError }],
-			});
+			// Pi records one message per tool result; Claude Code puts every result
+			// for an assistant turn in a single user message, and that is the only
+			// shape repairToolPairing accepts (Session.importMessages applies it
+			// too). Split across messages, the second and later results match no
+			// pending tool_use id: they are dropped and replaced with a synthetic
+			// "[no tool result recorded]", so every rebuild silently destroyed the
+			// output of parallel tool calls.
+			//
+			// Collecting into the turn's first result message rather than the
+			// immediately preceding one also handles a steer landing mid-execution,
+			// which pi records between the results (see extractAllToolResults).
+			// Hoisting the later results in front of it is what CC writes for the
+			// same turn anyway: all results, then the steer as its own user message.
+			const block = { type: "tool_result", tool_use_id: sanitizeToolId(msg.toolCallId, sanitizedIds), content: toolResultContent(msg.content), is_error: msg.isError };
+			if (turnResults) {
+				turnResults.content.push(block);
+			} else {
+				turnResults = { role: "user", content: [block] };
+				anthropicMessages.push(turnResults);
+			}
 		}
 	}
 
