@@ -10,6 +10,7 @@
 - **Fix: tool results paired by call order** — MCP handlers took their `toolCallId` from a positional cursor, so a call arriving out of order or not at all silently paired a result with the wrong tool call. Now uses Claude's `_meta["claudecode/toolUseId"]` and fails loudly if it is absent; also stops leaking `toolCallId` into the MCP result.
 - **Fix: images dropped from rebuilt sessions** — tool results carrying an image were flattened to text, and cc-session-io below 0.3.2 discarded image blocks from user messages, so images vanished whenever the bridge rewrote pi's history into a Claude Code session. Tool results now keep image blocks; requires cc-session-io `^0.3.2`.
 - **Add: one-time plan notice** — `provider.plan` defaults to `"pro"`, so Max subscribers silently lose Opus at 1M context if they don't set plan in settings. Now prints a one-time notice if plan isn't set.
+- **Fix: rebuilt sessions recorded the bare model id (issue #42)** — session rebuilds wrote pi's model id into the Claude Code transcript instead of the resolved CLI id, so records for a 1M model were missing the `[1m]` suffix. Metadata only: the served model and context window come from `--model`, which was already correct.
 
 
 ## 0.6.3 — 2026-07-26

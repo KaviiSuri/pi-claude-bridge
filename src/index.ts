@@ -1258,7 +1258,10 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 
 	const { mcpTools, customToolNameToSdk, customToolNameToPi } = resolveMcpTools(context, askClaudeToolName);
 	const cwd = (options as { cwd?: string } | undefined)?.cwd ?? process.cwd();
-	const syncResult = syncSharedSession(context.messages, cwd, customToolNameToSdk, model.id);
+	// cliModel is the actual id sent to Claude Code (may carry [1m]); model.id is the
+	// pi-registered id. Log cliModel so debug lines reflect what CC actually received.
+	const cliModel = claudeCodeModelId(model, longContextSettings);
+	const syncResult = syncSharedSession(context.messages, cwd, customToolNameToSdk, cliModel);
 	const { sessionId: resumeSessionId } = syncResult;
 	const promptBlocks = extractUserPromptBlocks(context.messages);
 	let promptText = extractUserPrompt(context.messages) ?? "";
@@ -1314,9 +1317,6 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 			?? REASONING_TO_EFFORT[options.reasoning]
 		: undefined;
 
-	// cliModel is the actual id sent to Claude Code (may carry [1m]); model.id is the
-	// pi-registered id. Log cliModel so debug lines reflect what CC actually received.
-	const cliModel = claudeCodeModelId(model, longContextSettings);
 	const extraArgs: Record<string, string | null> = { model: cliModel };
 	if (strictMcpConfigEnabled) extraArgs["strict-mcp-config"] = null;
 	// Opus 4.7 defaults thinking.display to "omitted" (empty thinking text in stream).
@@ -1513,7 +1513,7 @@ async function promptAndWait(
 		} else {
 			// No provider session yet — create one from pi's context
 			const contextWithPrompt = [...options.context, { role: "user" as const, content: prompt, timestamp: Date.now() }];
-			const sync = syncSharedSession(contextWithPrompt as Context["messages"], cwd, undefined, modelId);
+			const sync = syncSharedSession(contextWithPrompt as Context["messages"], cwd, undefined, cliModel);
 			resumeSessionId = sync.sessionId;
 		}
 	}
