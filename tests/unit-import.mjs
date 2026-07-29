@@ -268,4 +268,55 @@ describe("message structure", () => {
 		];
 		assert.equal(convert(msgs)[0].content[0].content, "line 1\nline 2");
 	});
+
+	// Claude Code stores screenshots as image blocks inside tool_result.content;
+	// flattening to text would drop them from a rebuilt session.
+	it("toolResult keeps image blocks instead of flattening to text", () => {
+		const msgs = [
+			{ role: "toolResult", toolCallId: "x", content: [
+				{ type: "text", text: "captured" },
+				{ type: "image", data: "BASE64DATA", mimeType: "image/png" },
+			]},
+		];
+		const result = convert(msgs)[0].content[0].content;
+		assert.deepEqual(result, [
+			{ type: "text", text: "captured" },
+			{ type: "image", source: { type: "base64", media_type: "image/png", data: "BASE64DATA" } },
+		]);
+	});
+
+	// The string shape is what CC writes for text-only results; switching to
+	// blocks unconditionally would diverge from it and perturb the cache key.
+	it("toolResult without an image stays a flat string", () => {
+		const msgs = [
+			{ role: "toolResult", toolCallId: "x", content: [{ type: "text", text: "just text" }] },
+		];
+		assert.equal(convert(msgs)[0].content[0].content, "just text");
+	});
+
+	it("toolResult keeps markers for blocks that are neither text nor image", () => {
+		const msgs = [
+			{ role: "toolResult", toolCallId: "x", content: [
+				{ type: "document" },
+				{ type: "image", data: "BASE64DATA", mimeType: "image/png" },
+			]},
+		];
+		const result = convert(msgs)[0].content[0].content;
+		assert.deepEqual(result, [
+			{ type: "text", text: "[document]" },
+			{ type: "image", source: { type: "base64", media_type: "image/png", data: "BASE64DATA" } },
+		]);
+	});
+
+	it("toolResult with only an image keeps the image", () => {
+		const msgs = [
+			{ role: "toolResult", toolCallId: "x", content: [
+				{ type: "image", data: "BASE64DATA", mimeType: "image/png" },
+			]},
+		];
+		const result = convert(msgs)[0].content[0].content;
+		assert.deepEqual(result, [
+			{ type: "image", source: { type: "base64", media_type: "image/png", data: "BASE64DATA" } },
+		]);
+	});
 });

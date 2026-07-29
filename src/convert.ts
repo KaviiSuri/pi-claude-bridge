@@ -44,6 +44,29 @@ export function messageContentToText(
 	return hasText ? parts.join("\n") : "";
 }
 
+// Tool results are flattened to text, which is how Claude Code stores most of
+// them. Images are the exception: they have no text form, so a result carrying
+// one keeps the block array shape instead (also what CC writes for screenshots).
+function toolResultContent(
+	content: string | Array<{ type: string; text?: string; data?: string; mimeType?: string }>,
+): string | Array<Record<string, unknown>> {
+	if (typeof content === "string" || !Array.isArray(content)) return messageContentToText(content) || "";
+	const images = content.filter((b) => b.type === "image" && b.data && b.mimeType);
+	if (!images.length) return messageContentToText(content) || "";
+	const blocks: Array<Record<string, unknown>> = [];
+	for (const block of content) {
+		if (block.type === "text" && block.text) blocks.push({ type: "text", text: block.text });
+		else if (block.type === "image" && block.data && block.mimeType) {
+			blocks.push({ type: "image", source: { type: "base64", media_type: block.mimeType, data: block.data } });
+		} else if (block.type !== "text" && block.type !== "image") {
+			// Same marker messageContentToText leaves for unrecognized blocks, so the
+			// text and image paths describe an extension's output the same way.
+			blocks.push({ type: "text", text: `[${block.type}]` });
+		}
+	}
+	return blocks;
+}
+
 /** Convert pi message array to Anthropic API format. */
 export function convertPiMessages(
 	messages: PiMessage[],
@@ -88,10 +111,9 @@ export function convertPiMessages(
 			if (!blocks.length) blocks.push({ type: "text", text: "[incompatible content omitted]" });
 			anthropicMessages.push({ role: "assistant", content: blocks });
 		} else if (msg.role === "toolResult") {
-			const text = typeof msg.content === "string" ? msg.content : messageContentToText(msg.content);
 			anthropicMessages.push({
 				role: "user",
-				content: [{ type: "tool_result", tool_use_id: sanitizeToolId(msg.toolCallId, sanitizedIds), content: text || "", is_error: msg.isError }],
+				content: [{ type: "tool_result", tool_use_id: sanitizeToolId(msg.toolCallId, sanitizedIds), content: toolResultContent(msg.content), is_error: msg.isError }],
 			});
 		}
 	}
