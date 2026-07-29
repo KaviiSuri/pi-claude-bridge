@@ -147,10 +147,12 @@ non-MCP name in test/temp dirs, across 469 files — `McpCustomToolsBash` ×3843
 correct `mcp__*` name.
 
 Cause: the replay harness calls the conversion without a populated
-`customToolNameToSdk` map, so `mapPiToolNameToSdk` (`src/convert.ts:22`) falls
-through — either to `PI_TO_SDK_TOOL_NAME`, turning pi's `bash` into Claude Code's
-builtin `Bash`, or to `pascalCase`, turning `mcp__custom-tools__bash` into
-`McpCustomToolsBash`.
+`customToolNameToSdk` map, so `mapPiToolNameToSdk` (`src/convert.ts:43`) falls
+through — to `PI_TO_SDK_TOOL_NAME`, turning pi's `bash` into Claude Code's builtin
+`Bash`, or to `pascalCase` for anything else. The `McpCustomTools*` names in the
+corpus came from that same map-less call handed an *already-prefixed* name, which
+now throws (c31560bd); the builtin-name and `pascalCase` halves are unchanged, so
+a map-less replay still manufactures the condition.
 
 Why it matters: the provider path runs with `tools: []`, so a rebuilt transcript
 claiming Claude previously called `Bash` is telling the model that a builtin it
@@ -280,7 +282,7 @@ the time against a 0.6% control — so record round-tripping is not the whole st
 
 **Thinking blocks are untested, not exonerated.** The obvious log-side proxy does
 not exist: `reasoning=` appears in **0** of 14,994 `usage:` lines, so the SDK never
-reports reasoning tokens to the bridge and `src/index.ts:814`'s `reasoningText` is
+reports reasoning tokens to the bridge and `src/index.ts:825`'s `reasoningText` is
 dead in practice. The transcript-join fallback (match the 8-char `resume=` prefix
 to a surviving `.jsonl`, then look at CC-authored records inside the previous
 query's time window) only lands 20 of 263 boundaries — most sessions have since
@@ -426,8 +428,8 @@ child keeps issuing `/v1/messages`. Fix shape: tie the query's `AbortController`
 to pi's process lifetime, and cap consecutive tool failures.
 
 Also unscanned: **thinking blocks dropped for want of a signature**.
-`src/index.ts:1044` stores `thinkingSignature: block.signature ?? ""` and
-`src/convert.ts:109` requires a truthy signature to replay. Across all pi
+`src/index.ts:1056` stores `thinkingSignature: block.signature ?? ""` and
+`src/convert.ts:135` requires a truthy signature to replay. Across all pi
 sessions, 26 of 2,363 `claude-bridge` thinking blocks (1.1%, 59,785 chars) have an
 empty signature and are dropped from every rebuild — largest single loss 6,013
 chars. The drop is correct behaviour (Anthropic rejects unverifiable signatures);

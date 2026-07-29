@@ -1,5 +1,77 @@
 # TODO
 
+## Open Correctness Issues
+
+From the 2026-07-29 silent-loss audit. `diag/AUDIT.md` holds the evidence and the
+scanners that produced it; this section is the actionable residue. Re-run the
+scanners with `--since <date of last good run>` before assuming any of it is stale.
+
+- **~28% of `--resume` boundaries re-send the whole conversation** (12.3M tokens
+  in the audited window). Correlates monotonically with how many records CC
+  appended during the previous query, and the worst cases are `path=reuse`
+  boundaries where the bridge never touched the session file — so this may be
+  Claude Code's resume round-trip, not ours. Next step is decisive and available
+  today: point `ANTHROPIC_BASE_URL` at a logging proxy and diff turn N's
+  `messages` against turn N+1's prefix. To take it upstream it also needs a
+  repro on a session file CC wrote entirely itself. See `diag/AUDIT.md` →
+  "Finding: ~28% of `--resume` boundaries".
+
+- **Orphaned Claude Code subprocess after the pi process dies**: the CC child is
+  not killed, every MCP call then fails `Stream closed`, CC feeds that to the
+  model as a tool error and issues another API request — forever. Two observed
+  incidents ran 59 and 23 minutes; the second tripped an account-wide 429. Fix
+  shape: tie the query's `AbortController` to pi's process lifetime, and cap
+  consecutive tool failures. See `diag/AUDIT.md` → "Not covered by these scripts".
+
+- **4 stranded MCP handlers and 7 orphan queued results remain unexplained**
+  (out of 32 and 14; the rest are accounted for by abort/shutdown or the
+  phantom-tool bug). Each of the 4 is a pi process whose last log line ever is
+  the `waiting` warning, with the CC log ending 0.3–3.2 s later — consistent with
+  pi exiting mid-dispatch, not confirmed. Related open decision: whether the
+  bridge should time out a handler that has waited implausibly long instead of
+  only warning. That is a fallback path and needs explicit sign-off before
+  anyone builds it.
+
+- **A failure that arrives while no pi stream is open never reaches the user.**
+  7ff04fd2 made `consumeQuery` record the error (stopReason, errorMessage, log)
+  when a result lands after the turn already ended on a tool call, but there is no
+  open `currentPiStream` to push an error event onto, so the user sees a stalled
+  turn rather than "rate limited". Surfacing it means synthesizing a turn that pi
+  did not ask for — a fallback path, so it needs explicit sign-off on the shape
+  before it is built. `tests/unit-error-result.mjs` covers the recording; nothing
+  covers the surfacing, because there is nothing to surface it with.
+
+- **17 never-answered tool calls** (`[no tool result recorded]` as the lone stub
+  of a single-`tool_use` turn) have no explanation. The other 389 occurrences are
+  the fixed parallel-results bug. Needs a repro before it can be fixed.
+
+- **1.1% of thinking blocks are dropped for want of a signature**: 26 of 2,363
+  `claude-bridge` thinking blocks carry an empty `thinkingSignature`, so
+  `src/convert.ts:135` correctly refuses to replay them (Anthropic rejects
+  unverifiable signatures). Unexplained: why the SDK omits the signature. Cheap
+  first step is a WARNING at the `?? ""` site (`src/index.ts:1056`) to make the
+  rate visible going forward.
+
+- **`reasoningText` is dead code** (`src/index.ts:825`): `reasoning=` appears in
+  0 of 14,994 `usage:` lines, so the SDK never reports reasoning tokens to the
+  bridge. Either delete it or record that the SDK doesn't supply the field —
+  right now it reads as a working diagnostic.
+
+- **The benchmark harness manufactures the phantom-tool-call condition**: replay
+  calls the conversion without a populated `customToolNameToSdk` map, so pi's
+  `bash` is rebuilt as Claude Code's builtin `Bash` — telling the model a builtin
+  it cannot call was already used, which is the prompt condition behind the
+  deadlock fixed in 122914dd. A benchmark run can reproduce or mask that bug for
+  reasons unrelated to the code under test. Fix: pass the recorded tool list
+  through to `convertPiMessages`. Production is unaffected (verified over 86,652
+  real pi messages).
+
+- **Local-only docs to mirror into tracked files**: `eli/lifecycle-coverage-gaps.md`
+  (the QueryContext lifecycle × sync-path coverage map) and the "claims about how
+  Claude Code behaves" provenance rule in `.claude/CLAUDE.md` both live in
+  gitignored directories, so nobody else gets them. The provenance rule belongs
+  in `AGENTS.md`; the coverage map in `docs/` or as a section of `diag/AUDIT.md`.
+
 ## Features
 
 - **Markdown rendering** in expanded tool result view. Currently plain text.
@@ -44,6 +116,25 @@
   strict prompt fidelity, or instrument the test to assert on the AskClaude
   prompt args (not just the response) so we can distinguish "calling model
   embedded the answer" from a real bridge-side context leak.
+
+- **No replay fixtures from real SDK streams**: Every unit test of
+  `consumeQuery` hand-writes the SDK messages it feeds in, so they only cover
+  shapes we already knew to expect — a stream event CC starts emitting (or
+  stops emitting) is invisible until an int test happens to trip over it.
+  `tests/int-cc-contracts.mjs` pins the shapes we depend on, but nothing
+  captures a whole stream. Fix: record the raw SDK message sequence from one
+  real turn per scenario (plain text, parallel tools, steer mid-tool, error
+  result) into `tests/fixtures/`, and replay them through `consumeQuery`.
+  Scrub args and text the way `pi-history-310.jsonl` is scrubbed.
+
+- **Nothing asserts the int suite runs warning-free**: `deliverToolResults`
+  logs `WARNING:`/`BUG:` lines (stranded handlers, both maps non-empty,
+  steer with no prompt stream) that mean a real defect, and the int suite can
+  emit them while still passing — the stuck-handler bug shipped that way.
+  Fix: fail an int run whose debug log contains `BUG:` or an unexpected
+  `WARNING:`, with an explicit allowlist for the tests that induce one on
+  purpose. `diag/audit-warnings.mjs` already parses these lines; the gap is
+  that no test consults it.
 
 - **Structured diagnostics for tests**: Tests grep debug-log strings to verify
   internal state. The `syncResult:` marker added on `simplify-session-sync`
