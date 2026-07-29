@@ -113,6 +113,8 @@ function diagDump(label: string, data: Record<string, unknown>) {
 // registration can occur for the next session.
 const ACTIVE_STREAM_SIMPLE_KEY = Symbol.for("claude-bridge:activeStreamSimple");
 
+// Claude Code's own builtin tools, for the AskClaude path where CC really runs
+// them. The provider path never sees these — it starts CC with `tools: []`.
 const SDK_TO_PI_TOOL_NAME: Record<string, string> = {
 	read: "read", write: "write", edit: "edit", bash: "bash",
 };
@@ -641,16 +643,26 @@ export const __test = {
 
 // --- Provider helpers: tool name mapping ---
 
-function mapToolName(name: string, customToolNameToPi?: Map<string, string>): string {
+// AskClaude path: CC runs its own tools, so builtin names are real.
+function mapToolName(name: string): string {
 	const normalized = name.toLowerCase();
 	const builtin = SDK_TO_PI_TOOL_NAME[normalized];
 	if (builtin) return builtin;
-	if (customToolNameToPi) {
-		const mapped = customToolNameToPi.get(name) ?? customToolNameToPi.get(normalized);
-		if (mapped) return mapped;
-	}
 	if (normalized.startsWith(MCP_TOOL_PREFIX)) return name.slice(MCP_TOOL_PREFIX.length);
 	return name;
+}
+
+// Provider path: the query runs with `tools: []`, so the only tools CC can
+// legitimately call are the pi tools we serve over MCP. Any other name is the
+// model hallucinating a builtin (`bash`, `Bash`, `Edit`, an MCP server we don't
+// serve). CC answers those itself with "No such tool available" and retries
+// inside the same query, never dispatching them to our MCP server — so a tool
+// call under such a name must not reach pi. Forwarding one ran a tool CC never
+// dispatched (real side effects) and, because the retry carries a fresh
+// tool_use id, left the handler for the retry with no result to release it:
+// pi's result arrived keyed to the dead id, and both sides deadlocked.
+function piToolNameFor(name: string, customToolNameToPi: Map<string, string>): string | undefined {
+	return customToolNameToPi.get(name) ?? customToolNameToPi.get(name.toLowerCase());
 }
 
 // Renames for Claude Code SDK param names that differ from pi's native names.
@@ -917,11 +929,16 @@ function processStreamEvent(
 			c.turnBlocks.push({ type: "thinking", thinking: "", thinkingSignature: "", index: event.index });
 			c.currentPiStream!.push({ type: "thinking_start", contentIndex: c.turnBlocks.length - 1, partial: c.turnOutput });
 		} else if (event.content_block?.type === "tool_use") {
+			const piName = piToolNameFor(event.content_block.name, customToolNameToPi);
+			if (!piName) {
+				debug(`processStreamEvent: skipping tool_use for unserved tool ${event.content_block.name} [${event.content_block.id}] — CC rejects it and retries`);
+				return;
+			}
 			c.turnSawToolCall = true;
 			c.turnToolCallIds.push(event.content_block.id);
 			c.turnBlocks.push({
 				type: "toolCall", id: event.content_block.id,
-				name: mapToolName(event.content_block.name, customToolNameToPi),
+				name: piName,
 				arguments: (event.content_block.input as Record<string, unknown>) ?? {},
 				partialJson: "", index: event.index,
 			});
@@ -1030,14 +1047,18 @@ function processAssistantMessage(message: SDKMessage, model: Model<any>, customT
 			if (block.thinking) c.currentPiStream?.push({ type: "thinking_delta", contentIndex: idx, delta: block.thinking, partial: c.turnOutput });
 			c.currentPiStream?.push({ type: "thinking_end", contentIndex: idx, content: block.thinking ?? "", partial: c.turnOutput });
 		} else if (block.type === "tool_use") {
+			const piName = piToolNameFor(block.name, customToolNameToPi);
+			if (!piName) {
+				debug(`processAssistantMessage: skipping tool_use for unserved tool ${block.name} [${block.id}] — CC rejects it and retries`);
+				continue;
+			}
 			ensureTurnStarted(c);
 			c.turnSawToolCall = true;
 			c.turnToolCallIds.push(block.id);
-			const mappedArgs = mapToolArgs(mapToolName(block.name, customToolNameToPi), block.input);
 			c.turnBlocks.push({
 				type: "toolCall", id: block.id,
-				name: mapToolName(block.name, customToolNameToPi),
-				arguments: mappedArgs,
+				name: piName,
+				arguments: mapToolArgs(piName, block.input),
 			});
 			const idx = c.turnBlocks.length - 1;
 			const toolBlock = c.turnBlocks[idx];
