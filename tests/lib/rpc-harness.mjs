@@ -4,8 +4,8 @@
  */
 import { spawn } from "node:child_process";
 import { createWriteStream, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
+import { getClaudeDir } from "cc-session-io";
 import { fileURLToPath } from "node:url";
 import { StringDecoder } from "node:string_decoder";
 
@@ -16,19 +16,28 @@ const DIR = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const ENV_FILE = resolve(DIR, ".env.test");
 if (existsSync(ENV_FILE)) process.loadEnvFile(ENV_FILE);
 
-// Claude Code persists session state under ~/.claude. A sandbox that blocks
+// Claude Code persists session state under its config dir. A sandbox that blocks
 // those writes lets the first query succeed and then fails the next turn's
 // --resume with "No conversation found with session ID", which reads like a
 // bridge bug. Surface the real cause up front.
+//
+// Resolve that dir the way the bridge and cc-session-io do, honouring
+// CLAUDE_CONFIG_DIR: probing a hardcoded ~/.claude reports a sandbox failure
+// when CLAUDE_CONFIG_DIR points somewhere writable, and misses a real one when
+// it points somewhere that isn't. Create it first so a fresh config dir reads
+// as writable rather than as a blocked write.
 // Per-pid name: `npm test` runs the int-*.mjs files concurrently, and a shared
 // probe path lets one process delete the file another is still using.
-const PROBE = resolve(homedir(), ".claude", `.int-test-write-probe-${process.pid}`);
+const CLAUDE_DIR = getClaudeDir();
+const PROBE = resolve(CLAUDE_DIR, `.int-test-write-probe-${process.pid}`);
 try {
+	mkdirSync(CLAUDE_DIR, { recursive: true });
 	writeFileSync(PROBE, "");
 	rmSync(PROBE);
 } catch (err) {
 	throw new Error(
-		`Integration tests need write access to ~/.claude for Claude Code session state (got ${err.code}). Re-run outside the sandbox.`,
+		`Integration tests need write access to ${CLAUDE_DIR} for Claude Code session state (got ${err.code}). ` +
+			`Re-run outside the sandbox, or point CLAUDE_CONFIG_DIR at a writable directory.`,
 	);
 }
 
