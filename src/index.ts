@@ -1296,7 +1296,11 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		// tool result does — see deliverToolResults. Detached so the provider
 		// still returns its stream synchronously.
 		void deliverToolResults(resultCtx, allResults, steer, context.messages.length);
-		if (sharedSession) sharedSession.cursor = context.messages.length;
+		// The shared cursor tracks the top-level conversation. A reentrant subagent
+		// delivering its own results would drag it to that subagent's message count
+		// — observed pulling a parent from 5 back to 3, which cost the parent's next
+		// turn a full rebuild and a flushed prompt cache.
+		if (sharedSession && resultCtx === ctx()) sharedSession.cursor = context.messages.length;
 		resultCtx.latestCursor = Math.max(resultCtx.latestCursor, context.messages.length);
 		return stream;
 	}
@@ -1307,10 +1311,14 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	const lastMsg = context.messages[context.messages.length - 1];
 	if (lastMsg?.role === "toolResult") {
 		debug(`provider: orphaned tool result after abort, emitting end_turn`);
-		if (sharedSession) sharedSession.cursor = context.messages.length;
-		const c = ctx();  // capture current context for the microtask
+		if (sharedSession && activeQueryContexts.size === 0) sharedSession.cursor = context.messages.length;
+		// No query owns this result, so there is no context to reset: resetTurnState
+		// on the top-level ctx() would replace a live parent's turnOutput mid-stream,
+		// stranding the blocks it had already emitted. A throwaway context just
+		// supplies the empty message this turn ends with.
+		const c = new QueryContext();
+		c.resetTurnState(model);
 		queueMicrotask(() => {
-			c.resetTurnState(model);
 			stream.push({ type: "done", reason: "stop", message: c.turnOutput });
 			markStreamComplete(stream);
 			stream.end();
@@ -1557,8 +1565,11 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 				queryCtx.pendingToolCalls.clear();
 				queryCtx.pendingResults.clear();
 				queryCtx.activeQuery = null;
+				// Guarded like the two cleanups above: if a later query has already
+				// claimed this context, removing it from the routing set would send
+				// that query's tool results down the orphan path and strand its handler.
+				activeQueryContexts.delete(queryCtx);
 			}
-			activeQueryContexts.delete(queryCtx);
 			sdkQuery.close();
 		});
 
