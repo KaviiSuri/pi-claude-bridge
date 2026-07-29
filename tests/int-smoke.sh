@@ -81,14 +81,14 @@ run "system prompt: --system-prompt reaches Claude" \
     --system-prompt 'You are a pirate. You must end every response with the exact word ARRR.' \
     -p 'What is 2+2? Answer in one short sentence.' 2>&1 | grep -q ARRR && echo ok"
 
-# AskClaude only registers when a non-claude-bridge provider is active
-# The prompt must not name the tool: --mode json echoes the user message into the
-# same stream we grep. Asking for an exact, complete enumeration matters — a vague
-# "list your tools" lets the model summarise and drop the custom tool intermittently.
-run "tool: AskClaude registered" \
-  bash -c "pi --no-session -ne -e '$DIR' --mode json --provider '$ALT_PROVIDER' --model '$ALT_MODEL' -p 'List the exact name of every tool you have, one per line, and nothing else.' 2>&1 | grep -q AskClaude && echo ok"
-
-# AskClaude e2e: force a non-Claude model to call the tool and check for a tool result
+# AskClaude only registers when a non-claude-bridge provider is active.
+#
+# This covers registration too: `"toolName":"AskClaude"` appears only in tool
+# execution events, so a match proves pi dispatched a call to a registered tool.
+# The prompt names the tool, but the grep keys off the JSON field rather than the
+# bare name, so the user message --mode json echoes back cannot false-positive.
+# A separate "is it registered" check by asking the model to enumerate its tools
+# was dropped as both weaker and flaky — models summarise and omit custom tools.
 run "tool: AskClaude responds" \
   bash -c "pi --no-session -ne -e '$DIR' --provider '$ALT_PROVIDER' --model '$ALT_MODEL' --mode json \
     -p 'Use the AskClaude tool with prompt=\"What is 2+2? Reply with just the number.\" and then tell me the answer.' 2>&1 \
