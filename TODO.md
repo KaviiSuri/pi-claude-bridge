@@ -1,91 +1,118 @@
 # TODO
 
-## Open Correctness Issues
+Ordered by what to build and ship next, not by when it was found. "Build next" is
+ready to write today; the sections after it are gated on a decision, on evidence
+that does not exist yet, or on someone else's repo.
 
-From the 2026-07-29 silent-loss audit. `diag/AUDIT.md` holds the evidence and the
-scanners that produced it; this section is the actionable residue. Re-run the
-scanners with `--since <date of last good run>` before assuming any of it is stale.
+## Build next
 
-- **~25% of `--resume` boundaries re-send the whole conversation** (12.9M tokens,
-  recomputed with the corrected metric) — still unexplained, and still not
-  attributed. 33 bridge-free boundaries at 45–85k prompts on Haiku came back 0
-  cold, so the controlled runs neither implicate nor exonerate CC; the audited
-  failures are `claude-opus-5[1m]` at `xhigh` with 100–400k prompts collapsing to
-  2–13% cache hit. Next step is to leave `diag/capture-proxy.mjs` on during a real
-  session of that shape — there is now tooling to name the divergence the moment
-  one happens. Also recompute the dose-response table, which was built on the
-  metric's false-positive mode. See `diag/AUDIT.md` → "Finding: ~28% of `--resume`
-  boundaries".
+1. **#30: pruning costs Claude all context for that turn.** When `pi-context-prune`
+   shrinks pi's history below our cursor we clean-start, so Claude answers that turn
+   with no prior conversation. Rebuilding from the pruned messages keeps the
+   (compressed) context and still bounds the JSONL, which is what the issue asks
+   for. The discriminator must be **reentrancy, not message count**: the
+   shorter-context branch in `syncSharedSession` is also the guard that stops a
+   subagent resuming and overwriting the parent's session, and a subagent's priors
+   are not empty. `isReentrant` is already computed at `src/index.ts:1354`,
+   immediately before the call at `:1375`, and just isn't passed in. The stale
+   `fix/issue-30-pruned-history` branch discriminates on `priorMessages.length === 0`
+   and would break subagent isolation — do not merge it. Decide deliberately what
+   the AskClaude caller at `:1625` should pass. Guarded by
+   `unit-sync-shared-session.mjs` plus `int-subagent-rpiv-codebase-locator.mjs`.
 
-- **File upstream: CC's resume reorders same-millisecond `tool_result` blocks.**
-  Confirmed at 8 of 10 sessions (10 parallel `Read` calls, then a resume): the
-  resumed request's block order differs from the on-disk record order, always as
-  adjacent-pair swaps, and in all 8 every swapped pair shared a millisecond
-  timestamp. The live request matched disk order 10 of 10, so the writer is fine
-  and the reader is not. No measured cache cost — the reordered blocks sit in the
-  not-yet-cached tail — so this is a fidelity bug, not the cold-resume cause.
-  Repro script pattern is in `diag/AUDIT.md`; nothing to fix on our side.
+2. **Make the dropped-thinking-signature rate visible.** 26 of 2,363
+   `claude-bridge` thinking blocks carry an empty `thinkingSignature`, so
+   `src/convert.ts:135` correctly refuses to replay them (Anthropic rejects
+   unverifiable signatures) — but silently. A WARNING at the `?? ""` site
+   (`src/index.ts:1056`) turns a 1.1% invisible loss into a number, which is the
+   prerequisite for ever explaining it.
 
-- **Orphaned Claude Code subprocess, trigger unknown**: a CC child outlived its
-  pi session and burned API requests for 59 minutes (a second incident ran 23 and
-  tripped an account-wide 429). Probed rather than assumed:
-  `tests/int-shutdown-kills-cc.mjs` shows both reachable triggers already reap the
-  child — pi exiting closes its stdin, which CC honours even mid-tool-call, and a
-  user abort interrupts and closes the query. So the incidents needed a third
-  condition that leaves pi alive with its control channel closed, and there is
-  nothing to fix on the paths we can reach. Both predate the July 2026 tool-loop
-  fixes, there are two in 1,159 cc-cli logs, none since 2026-07-10, and no log has
-  between 1 and 5 failures — likely already fixed. The two tests are the tripwire;
-  reopen this only if one goes red or a third storm appears.
-  See `diag/AUDIT.md` → "Not covered by these scripts".
+3. **Delete `reasoningText`** (`src/index.ts:825`): `reasoning=` appears in 0 of
+   14,994 `usage:` lines, so the SDK never supplies the field. Right now it reads
+   as a working diagnostic. Delete it or record why it stays.
 
-- **4 stranded MCP handlers and 7 orphan queued results remain unexplained**
-  (out of 32 and 14; the rest are accounted for by abort/shutdown or the
-  phantom-tool bug). Each of the 4 is a pi process whose last log line ever is
-  the `waiting` warning, with the CC log ending 0.3–3.2 s later — consistent with
-  pi exiting mid-dispatch, not confirmed. Related open decision: whether the
-  bridge should time out a handler that has waited implausibly long instead of
-  only warning. That is a fallback path and needs explicit sign-off before
-  anyone builds it.
+4. **Fail an int run that logs `BUG:` or an unexpected `WARNING:`.** Those lines
+   mean a real defect and the int suite can emit them while passing — the
+   stuck-handler bug shipped exactly that way. `diag/audit-warnings.mjs` already
+   parses them; the gap is that no test consults it. Needs an explicit allowlist
+   for the tests that induce one on purpose.
+
+5. **Stop the benchmark harness manufacturing the phantom-tool-call condition.**
+   Replay calls the conversion without a populated `customToolNameToSdk` map, so
+   pi's `bash` is rebuilt as Claude Code's builtin `Bash` — the prompt condition
+   behind the deadlock fixed in 122914dd. A benchmark run can therefore reproduce
+   *or mask* that bug for reasons unrelated to the code under test. Fix: pass the
+   recorded tool list through to `convertPiMessages`. Production is unaffected
+   (verified over 86,652 real pi messages).
+
+6. **Mirror `eli/lifecycle-coverage-gaps.md` into a tracked file** — the
+   QueryContext lifecycle × sync-path coverage map is in a gitignored directory, so
+   nobody else gets it. Belongs in `docs/` or as a section of `diag/AUDIT.md`. (The
+   provenance rule is already in `AGENTS.md`.)
+
+## Blocked on a decision
+
+Both are fallback-shaped and need explicit sign-off on the shape before anyone
+writes them.
 
 - **A failure that arrives while no pi stream is open never reaches the user.**
   7ff04fd2 made `consumeQuery` record the error (stopReason, errorMessage, log)
   when a result lands after the turn already ended on a tool call, but there is no
   open `currentPiStream` to push an error event onto, so the user sees a stalled
-  turn rather than "rate limited". Surfacing it means synthesizing a turn that pi
-  did not ask for — a fallback path, so it needs explicit sign-off on the shape
-  before it is built. `tests/unit-error-result.mjs` covers the recording; nothing
-  covers the surfacing, because there is nothing to surface it with.
+  turn rather than "rate limited". Surfacing it means synthesizing a turn pi did
+  not ask for. `tests/unit-error-result.mjs` covers the recording; nothing covers
+  the surfacing, because there is nothing to surface it with. This is also the
+  third stall cause behind GitHub #35.
 
-- **17 never-answered tool calls** (`[no tool result recorded]` as the lone stub
-  of a single-`tool_use` turn) have no explanation. The other 389 occurrences are
-  the fixed parallel-results bug. Needs a repro before it can be fixed.
+- **Handler timeout / stall watchdog** — whether the bridge should give up on an
+  MCP handler that has waited implausibly long instead of only warning.
 
-- **1.1% of thinking blocks are dropped for want of a signature**: 26 of 2,363
-  `claude-bridge` thinking blocks carry an empty `thinkingSignature`, so
-  `src/convert.ts:135` correctly refuses to replay them (Anthropic rejects
-  unverifiable signatures). Unexplained: why the SDK omits the signature. Cheap
-  first step is a WARNING at the `?? ""` site (`src/index.ts:1056`) to make the
-  rate visible going forward.
+## Open questions — watch, don't build
 
-- **`reasoningText` is dead code** (`src/index.ts:825`): `reasoning=` appears in
-  0 of 14,994 `usage:` lines, so the SDK never reports reasoning tokens to the
-  bridge. Either delete it or record that the SDK doesn't supply the field —
-  right now it reads as a working diagnostic.
+No repro, so there is nothing to write yet. Re-run the scanners with
+`--since <date of last good run>`; `diag/AUDIT.md` holds the evidence.
 
-- **The benchmark harness manufactures the phantom-tool-call condition**: replay
-  calls the conversion without a populated `customToolNameToSdk` map, so pi's
-  `bash` is rebuilt as Claude Code's builtin `Bash` — telling the model a builtin
-  it cannot call was already used, which is the prompt condition behind the
-  deadlock fixed in 122914dd. A benchmark run can reproduce or mask that bug for
-  reasons unrelated to the code under test. Fix: pass the recorded tool list
-  through to `convertPiMessages`. Production is unaffected (verified over 86,652
-  real pi messages).
+- **~25% of `--resume` boundaries re-send the whole conversation** (12.9M tokens,
+  recomputed with the corrected metric) — unexplained and unattributed. 33
+  bridge-free boundaries at 45–85k prompts on Haiku came back 0 cold, so the
+  controlled runs neither implicate nor exonerate CC; the audited failures are
+  `claude-opus-5[1m]` at `xhigh` with 100–400k prompts collapsing to 2–13% cache
+  hit. Next step is to leave `diag/capture-proxy.mjs` on during a real session of
+  that shape rather than paying to synthesize one. **Also recompute the
+  dose-response table**, which was built on the metric's false-positive mode.
 
-- **Local-only doc to mirror into a tracked file**: `eli/lifecycle-coverage-gaps.md`
-  (the QueryContext lifecycle × sync-path coverage map) is in a gitignored
-  directory, so nobody else gets it. Belongs in `docs/` or as a section of
-  `diag/AUDIT.md`. (The provenance rule is now in `AGENTS.md`.)
+- **4 stranded MCP handlers and 7 orphan queued results** (of 32 and 14; the rest
+  are accounted for by abort/shutdown or the phantom-tool bug). Each of the 4 is a
+  pi process whose last log line ever is the `waiting` warning, with the CC log
+  ending 0.3–3.2 s later — consistent with pi exiting mid-dispatch, not confirmed.
+
+- **17 never-answered tool calls** (`[no tool result recorded]` as the lone stub of
+  a single-`tool_use` turn). The other 389 occurrences are the fixed
+  parallel-results bug.
+
+- **Orphaned Claude Code subprocess, trigger unknown.** A CC child outlived its pi
+  session and burned API requests for 59 minutes; a second incident ran 23 and
+  tripped an account-wide 429. `tests/int-shutdown-kills-cc.mjs` shows both
+  reachable triggers already reap the child — pi exiting closes its stdin, which CC
+  honours even mid-tool-call, and a user abort interrupts and closes the query. So
+  the incidents needed a third condition that leaves pi alive with its control
+  channel closed. Two in 1,159 cc-cli logs, none since 2026-07-10, all predating
+  the July tool-loop fixes, and no log has between 1 and 5 failures — likely
+  already fixed. Those tests are the tripwire; reopen only if one goes red.
+
+- **Why the SDK omits a thinking signature** (see build item 2 for the visibility
+  step).
+
+## File upstream, nothing to fix here
+
+- **CC's resume reorders same-millisecond `tool_result` blocks.** 8 of 10 sessions
+  (10 parallel `Read` calls, then a resume): the resumed request's block order
+  differs from the on-disk record order, always as adjacent-pair swaps, and in all
+  8 every swapped pair shared a millisecond timestamp. The live request matched
+  disk 10 of 10, so CC's writer is faithful and its reader is not. Deterministic
+  per session file, so it costs one cache write rather than a recurring tax, and
+  rare: 2 of 417 real parallel groups carry a tie. Repro pattern in
+  `diag/AUDIT.md`.
 
 ## Features
 
@@ -119,7 +146,7 @@ scanners with `--since <date of last good run>` before assuming any of it is sta
   applicable to AskClaude subagents. See `fractary/pi-claude-code`
   `PlanMode.ts`.
 
-## Testing Gaps
+## Lower-priority testing gaps
 
 - **Structured diagnostics for tests**: Tests grep debug-log strings to verify
   internal state. The `syncResult:` marker added on `simplify-session-sync`
@@ -205,4 +232,3 @@ scanners with `--since <date of last good run>` before assuming any of it is sta
     the SDK or reach into private state. Rejected unless the SDK grows a
     `close({ graceful: true })` or equivalent hook that awaits subprocess
     exit.
-
