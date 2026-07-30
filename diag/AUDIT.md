@@ -28,7 +28,7 @@ being read. Pass the date of the last known-good run to ask "has anything gone
 wrong since?". One caveat: a rebuild re-stamps old messages with the time it ran,
 so a session rebuilt inside the window drags its whole history in with it.
 
-`--ceiling` exists because the 24.5% boundary break rate below is an open finding
+`--ceiling` exists because the 24.8% boundary break rate below is an open finding
 rather than a regression; set it just above the current rate to catch that number
 getting *worse* while the cause is unresolved.
 
@@ -181,10 +181,10 @@ reading back less cache than the previous one wrote means the prefix diverged.
 Both known bugs were prefix-mutation bugs, making this the cheapest always-on
 integrity signal available.
 
-**Metric.** In a healthy continuation, `cacheRead[N] == in + cacheRead +
-cacheWrite [N-1]` — the previous turn's *prompt* tokens, not its total; the
-previous output lands in `cacheWrite`. Calibrated over 5,923 healthy pairs:
-median −2 tokens, p05 −3, p95 −1. A break is a shortfall ≥ 2,000 tokens, matching
+**Metric.** In a healthy continuation, `cacheRead[N] == cacheRead + cacheWrite
+[N-1]` — what the previous request left in the cache. Its `in` is excluded: those
+tokens were not cached, and a tool-heavy turn sends its whole result payload that
+way (see the false-positive section below, which is how this was found). A break is a shortfall ≥ 2,000 tokens, matching
 `MIN_CACHE_MISS_TOKENS` in Claude Code's own
 `src/services/api/promptCacheBreakDetection.ts`.
 
@@ -205,15 +205,15 @@ Two parsing traps, both of which produced wrong answers on the first pass:
 ### Baseline (2026-07-29, 7,543 requests)
 
 ```
-in-query   40 / 6372 pairs   0.6%   3.2M tok    <- control
-boundary  133 /  542 pairs  24.5%  12.3M tok    <- --resume boundaries
+in-query   40 / 6466 pairs   0.6%   3.2M tok    <- control
+boundary  136 /  549 pairs  24.8%  12.9M tok    <- --resume boundaries
 breaks on a rebuild boundary: 35
 ```
 
-Classified out as benign: idle > 5 min (87), effort changed (30), model change
+Classified out as benign: idle > 5 min (88), effort changed (30), model change
 (29), compaction/new session (10), tool set changed (2).
 
-### Finding: ~28% of `--resume` boundaries re-send the whole conversation
+### Finding: ~25% of `--resume` boundaries re-send the whole conversation
 
 The one finding here that neither known bug explains.
 
@@ -318,13 +318,95 @@ literal diff file is strictly more expensive — it additionally requires
 `changes.buildPrevDiffableContent`, set only when a previous snapshot exists — so
 grep the reason string first and only chase the diff if it is ambiguous.
 
-**Available today, and decisive:** capture the request bodies. The shipped
-`sdk.mjs` honours `ANTHROPIC_BASE_URL`, and the bridge passes `process.env`
-through to the child, so pointing it at a local logging proxy and diffing turn
-N's `messages` array against turn N+1's prefix names the exact block that changed.
-Run one session with a text-only turn followed by a 5-tool turn — per the table
-above that should reproduce at ~40%. Caveat to check first: subscription OAuth may
-refuse a non-Anthropic base URL, in which case this needs an API key.
+**The request-body capture is built and works** — `diag/capture-proxy.mjs` plus
+`diag/diff-captures.mjs`:
+
+```
+node diag/capture-proxy.mjs --out /tmp/cap &
+ANTHROPIC_BASE_URL=http://127.0.0.1:8787 pi --model claude-bridge/claude-haiku-4-5
+node diag/diff-captures.mjs /tmp/cap
+```
+
+Subscription OAuth forwards through a custom base URL, so no API key is needed —
+that caveat is settled. Treat the capture dir as sensitive: it holds whole
+conversations. (Authorization headers are forwarded but never written.)
+
+### The metric had a false-positive mode; fixed, and the corpus number survives
+
+An earlier version of this section claimed the finding reproduced in stock CC at
+23%. It did not — that was the metric. The old expectation was
+`cacheRead[N] == in + cacheRead + cacheWrite [N-1]`, and `in` is exactly the
+tokens the API did *not* cache on that request. A turn that just ran tools sends
+its whole result payload as uncached `in` (measured: `in=9409, cacheRead=45035,
+cacheWrite=2327` on a 10-parallel-read turn), and the next request reads back
+45035+2327 and writes the 9409. Nothing was lost; the old formula scored it as a
+9,409-token break, and did so most often on precisely the tool-heavy turns whose
+dose-response it was being used to explain.
+
+Both scanners now expect `cacheRead + cacheWrite [N-1]` — what the previous
+request demonstrably left cached. On the April–July corpus this changes almost
+nothing (24.5% → 24.8% of boundaries, 12.3M → 12.9M tokens) because real breaks
+collapse `cacheRead` to 2–13% of the prompt, far past one turn's `in`. **So the
+corpus finding is not an artifact — but it also has not been reproduced.**
+
+### The controlled runs do not reproduce it
+
+33 bridge-free boundaries (`claude -p … --resume`, CC's own session file and tools,
+one process per turn) at 45–85k prompts on Haiku: **0 cold** under the corrected
+metric. Reads land within 10 tokens of expectation every time. The audited failures
+are `claude-opus-5[1m]` at `xhigh` with 100–400k prompts and total collapse — a
+regime none of these runs approached — so leave `diag/capture-proxy.mjs` on during
+a real session of that shape rather than paying to synthesize one.
+
+### Confirmed instead: CC's resume reorders same-millisecond tool_results
+
+Ten sessions, each a single turn of 10 parallel `Read` calls followed by a resume,
+comparing the resumed request's block order against the session file on disk:
+
+```
+8 of 10 resumes reordered a parallel tool_result group
+in all 8, every swapped pair shared a millisecond timestamp
+the live request's order matched disk order in 10 of 10
+```
+
+Always adjacent-pair swaps, never a shuffle. So the write is faithful and the read
+is not: reconstructing a conversation from the JSONL does not preserve the relative
+order of `tool_result` records that share a timestamp. Two sessions with tied pairs
+came back unchanged, so a tie permits the divergence rather than forcing it.
+
+**It is deterministic per session file, not a race.** Resuming the same session
+three times reproduced byte-identical order every time — the reordered session
+reordered the same two pairs on all three resumes, the unchanged one stayed
+unchanged. The cost is therefore one cache write, not a recurring tax: the first
+resume wrote 57,014 tokens and the next two read them straight back (`write=45`).
+
+This is a genuine fidelity bug in Claude Code and it is filable — it reproduces on
+demand at ~80% with ten parallel reads. It is also rare in practice, because the
+repro manufactures the tie: across 1,548 pre-existing session files only 2 of 417
+CC-authored parallel groups contain a same-millisecond pair (0.5%), since real
+batches are 2–3 calls (406 of 417) whose results land milliseconds apart. Bridge-
+written records cannot tie at all — cc-session-io stores a turn's results in one
+record with one timestamp — so only CC's live-appended groups are exposed.
+Measured: the order is stable across repeated resumes, so no repeated invalidation. What it is *not* is an explanation of the
+cold resumes: the reordered blocks sit in the not-yet-cached tail, and the ten
+sessions show no cache shortfall at all. An earlier version of this section claimed
+the transposition was "sufficient on its own to produce a cold resume"; the two
+unchanged-order sessions had the same cache profile as the eight reordered ones,
+so that claim was wrong.
+
+Two facts the capture settles regardless:
+
+- **CC's per-request billing header is not what breaks the cache.** `system[0]` is
+  `x-anthropic-billing-header: … cch=<hash>`, carries no `cache_control`, and
+  changes on every single request — yet req-0006 read back exactly the 12,205
+  tokens req-0004 had written under a different `cch=`. The cached prefix begins
+  after it.
+- **CC asks for a 1-hour cache TTL**, not five minutes: both cacheable system
+  blocks carry `cache_control: {type: "ephemeral", ttl: "1h"}` on
+  `/v1/messages?beta=true`. That reinterprets the gap table above — under a 1h TTL
+  the `>1h` row (96.7% cold) is simply expiry, but `15-60min` at 78.3% is not, so
+  either the TTL request is newer than the April–July log window or something else
+  evicts well inside it.
 
 Cost, meanwhile, is real: 12.3M tokens re-cached in the classified-clean set alone.
 
@@ -336,21 +418,21 @@ the session file at all, and the records implicated are the ones **CC itself**
 appended during the previous query. If that holds, every SDK consumer that resumes
 a session pays the same tax, and it belongs upstream rather than in this repo.
 
-Evidence needed to make that case:
+Evidence needed to make that case, and where it now stands:
 
-1. A request-body diff (the proxy experiment above) showing that the messages CC
-   sends after `--resume` differ from what it sent live, with the differing block
-   identified.
-2. The same reproduced with a session file **written entirely by Claude Code** —
-   no bridge involvement, no cc-session-io records — so the report does not depend
-   on our writer. Take any CC-authored transcript from `~/.claude/projects/`, run
-   `claude --resume <id>` twice, and compare cache hit rates.
-3. The dose-response table above, which shows it scales with appended record
-   count rather than firing at random.
+1. **A request-body diff — the tooling exists and works** (`capture-proxy.mjs` +
+   `diff-captures.mjs`), but it has never yet been pointed at a request that
+   actually broke. 33 controlled boundaries produced no break to diff.
+2. **Reproduced on a CC-authored session file — not achieved.** The scripted runs
+   are bridge-free as intended, but they never went cold, so they neither
+   implicate nor exonerate CC for this finding. Still open.
+3. **The dose-response — now suspect.** It was computed with the metric whose
+   false-positive mode scales with tool-result size, which is the same thing the
+   table's x-axis measures. Recompute it against the corrected expectation before
+   relying on it.
 
-Until (2) exists the finding is ambiguous between CC and the mixed-provenance
-files the bridge produces, since 352 of 1,810 transcripts contain both record
-shapes.
+The one upstream report that *is* ready is unrelated to caching: the reordering of
+same-millisecond parallel `tool_result` blocks on resume.
 
 ---
 

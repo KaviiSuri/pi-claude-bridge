@@ -6,15 +6,25 @@ From the 2026-07-29 silent-loss audit. `diag/AUDIT.md` holds the evidence and th
 scanners that produced it; this section is the actionable residue. Re-run the
 scanners with `--since <date of last good run>` before assuming any of it is stale.
 
-- **~28% of `--resume` boundaries re-send the whole conversation** (12.3M tokens
-  in the audited window). Correlates monotonically with how many records CC
-  appended during the previous query, and the worst cases are `path=reuse`
-  boundaries where the bridge never touched the session file — so this may be
-  Claude Code's resume round-trip, not ours. Next step is decisive and available
-  today: point `ANTHROPIC_BASE_URL` at a logging proxy and diff turn N's
-  `messages` against turn N+1's prefix. To take it upstream it also needs a
-  repro on a session file CC wrote entirely itself. See `diag/AUDIT.md` →
-  "Finding: ~28% of `--resume` boundaries".
+- **~25% of `--resume` boundaries re-send the whole conversation** (12.9M tokens,
+  recomputed with the corrected metric) — still unexplained, and still not
+  attributed. 33 bridge-free boundaries at 45–85k prompts on Haiku came back 0
+  cold, so the controlled runs neither implicate nor exonerate CC; the audited
+  failures are `claude-opus-5[1m]` at `xhigh` with 100–400k prompts collapsing to
+  2–13% cache hit. Next step is to leave `diag/capture-proxy.mjs` on during a real
+  session of that shape — there is now tooling to name the divergence the moment
+  one happens. Also recompute the dose-response table, which was built on the
+  metric's false-positive mode. See `diag/AUDIT.md` → "Finding: ~28% of `--resume`
+  boundaries".
+
+- **File upstream: CC's resume reorders same-millisecond `tool_result` blocks.**
+  Confirmed at 8 of 10 sessions (10 parallel `Read` calls, then a resume): the
+  resumed request's block order differs from the on-disk record order, always as
+  adjacent-pair swaps, and in all 8 every swapped pair shared a millisecond
+  timestamp. The live request matched disk order 10 of 10, so the writer is fine
+  and the reader is not. No measured cache cost — the reordered blocks sit in the
+  not-yet-cached tail — so this is a fidelity bug, not the cold-resume cause.
+  Repro script pattern is in `diag/AUDIT.md`; nothing to fix on our side.
 
 - **Orphaned Claude Code subprocess, trigger unknown**: a CC child outlived its
   pi session and burned API requests for 59 minutes (a second incident ran 23 and

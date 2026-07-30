@@ -115,10 +115,13 @@ function run() {
 		requests += rs.length;
 		for (let i = 1; i < rs.length; i++) {
 			const prev = rs[i - 1], cur = rs[i];
-			// In a healthy continuation cacheRead of turn N equals turn N-1's prompt
-			// tokens (in + cacheRead + cacheWrite) to within ~2 tokens; the previous
-			// turn's *output* lands in cacheWrite, not cacheRead.
-			const expected = prev.in + prev.cacheRead + prev.cacheWrite;
+			// What turn N-1 demonstrably left in the cache: what it read plus what it
+			// wrote. Its `in` is deliberately excluded — those are tokens the API did
+			// *not* cache on that request, so expecting them back is a false positive,
+			// and a tool-heavy turn sends its whole result payload as uncached `in`.
+			// (On the April–July corpus both formulas flag the same 336 pairs, because
+			// real breaks collapse cacheRead by far more than one turn's `in`.)
+			const expected = prev.cacheRead + prev.cacheWrite;
 			const shortfall = expected - cur.cacheRead;
 
 			const fresh = cur.marks.map((m) => FRESH.exec(m)).filter(Boolean).at(-1);
@@ -159,7 +162,7 @@ function run() {
 	const rate = (g) => (g.n ? g.breaks / g.n : 0);
 	console.log(`log:      ${logPath}`);
 	console.log(`requests: ${requests} API requests (deduped from usage lines)`);
-	console.log(`baseline: cacheRead[N] should equal in+cacheRead+cacheWrite[N-1]; break = shortfall >= ${MIN_SHORTFALL} tok\n`);
+	console.log(`baseline: cacheRead[N] should equal cacheRead+cacheWrite[N-1]; break = shortfall >= ${MIN_SHORTFALL} tok\n`);
 
 	console.log("prefix changes classified as benign:");
 	for (const [reason, b] of [...benign].sort((a, b) => b[1].tokens - a[1].tokens)) {
