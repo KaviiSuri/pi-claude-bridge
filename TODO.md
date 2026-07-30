@@ -82,11 +82,10 @@ scanners with `--since <date of last good run>` before assuming any of it is sta
   through to `convertPiMessages`. Production is unaffected (verified over 86,652
   real pi messages).
 
-- **Local-only docs to mirror into tracked files**: `eli/lifecycle-coverage-gaps.md`
-  (the QueryContext lifecycle × sync-path coverage map) and the "claims about how
-  Claude Code behaves" provenance rule in `.claude/CLAUDE.md` both live in
-  gitignored directories, so nobody else gets them. The provenance rule belongs
-  in `AGENTS.md`; the coverage map in `docs/` or as a section of `diag/AUDIT.md`.
+- **Local-only doc to mirror into a tracked file**: `eli/lifecycle-coverage-gaps.md`
+  (the QueryContext lifecycle × sync-path coverage map) is in a gitignored
+  directory, so nobody else gets it. Belongs in `docs/` or as a section of
+  `diag/AUDIT.md`. (The provenance rule is now in `AGENTS.md`.)
 
 ## Features
 
