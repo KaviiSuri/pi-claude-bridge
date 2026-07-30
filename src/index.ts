@@ -36,6 +36,32 @@ const DEBUG = process.env.CLAUDE_BRIDGE_DEBUG === "1";
 const DEBUG_LOG_PATH = process.env.CLAUDE_BRIDGE_DEBUG_PATH || join(homedir(), ".pi", "agent", "claude-bridge.log");
 const DIAG_LOG_PATH = join(homedir(), ".pi", "agent", "claude-bridge-diag.log");
 
+// CLAUDE_BRIDGE_RECORD_STREAM=<path> appends every SDK message consumeQuery sees,
+// one JSON object per line. Used by tests/lib/record-sdk-streams.mjs to capture
+// replay fixtures, so unit tests assert against message shapes Claude Code really
+// emitted rather than ones we imagined.
+const RECORD_STREAM_PATH = process.env.CLAUDE_BRIDGE_RECORD_STREAM;
+
+// Applied to every Claude Code subprocess the bridge spawns — provider, AskClaude
+// and the compact summary. One place, so a guard is added once rather than three
+// times, and so a missing one is visible.
+//
+// - ENABLE_CLAUDEAI_MCP_SERVERS=0: keep the user's claude.ai-connected MCP servers
+//   out of a pi session, which serves its own tools.
+// - DISABLE_AUTO_COMPACT=1: pi owns compaction; CC compacting its own copy would
+//   diverge from pi's history, which is the source of truth for every rebuild.
+// - CLAUDE_CODE_DISABLE_AUTO_MEMORY=1: without it CC forks an extract-memories
+//   agent at turn end that appends to `<claude config>/memory/MEMORY.md` and topic
+//   files under the project. That agent runs its own tools, so `tools: []` does not
+//   stop it, and the effect is a pi conversation silently writing into the user's
+//   Claude Code memory as though it had been an interactive CC session. pi has its
+//   own memory; the bridge must not populate CC's.
+const CC_CHILD_ENV = {
+	ENABLE_CLAUDEAI_MCP_SERVERS: "0",
+	DISABLE_AUTO_COMPACT: "1",
+	CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
+} as const;
+
 // Ensure log directories exist when debug is enabled
 if (DEBUG) {
 	try {
@@ -379,7 +405,7 @@ async function runIsolatedSummary(
 			prompt: promptText,
 			options: {
 				cwd,
-				env: { ...process.env, DISABLE_AUTO_COMPACT: "1", CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1" },
+				env: { ...process.env, ...CC_CHILD_ENV },
 				tools: [],
 				strictMcpConfig: true,
 				settingSources: [] as SettingSource[],
@@ -650,6 +676,7 @@ export const __test = {
 	resultErrorText,
 	deliverToolResults,
 	drainForAbort,
+	CC_CHILD_ENV,
 	buildMcpServers,
 };
 
@@ -1108,6 +1135,7 @@ async function consumeQuery(
 	let capturedSessionId: string | undefined;
 
 	for await (const message of sdkQuery) {
+		if (RECORD_STREAM_PATH) appendFileSync(RECORD_STREAM_PATH, `${JSON.stringify(message)}\n`);
 		if (wasAborted()) break;
 		// Everything below the currentPiStream guard is content, which there is
 		// nowhere to put once a turn has ended on a tool call. These three are not
@@ -1448,7 +1476,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// also autocompact would double-flush the prompt cache and races pi's
 	// threshold with CC's, including CC's anti-thrashing guard (issue #8).
 	// Manual /compact in CC still works (we never invoke it).
-	const childEnv = { ...process.env, ENABLE_CLAUDEAI_MCP_SERVERS: "0", DISABLE_AUTO_COMPACT: "1" };
+	const childEnv = { ...process.env, ...CC_CHILD_ENV };
 	const queryOptions: NonNullable<Parameters<typeof query>[0]["options"]> = {
 		cwd,
 		env: childEnv,
@@ -1655,7 +1683,7 @@ async function promptAndWait(
 		prompt,
 		options: {
 			cwd,
-			env: { ...process.env, ENABLE_CLAUDEAI_MCP_SERVERS: "0", DISABLE_AUTO_COMPACT: "1" },
+			env: { ...process.env, ...CC_CHILD_ENV },
 			permissionMode: "bypassPermissions",
 			...(disallowedTools.length ? { disallowedTools } : {}),
 			...(effort ? { effort } : {}),
