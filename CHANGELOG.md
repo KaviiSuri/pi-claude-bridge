@@ -13,6 +13,7 @@
 - **Fix: API errors reported as a successful turn (issue #43)** — CC flags failures with `is_error` on a result whose subtype is still `"success"`, so the bridge duplicated the error text and finalized as a normal stop. Failed results now end the turn with `stopReason: "error"`, and the compact-summary path no longer accepts an errored result as a summary.
 - **Fix: rebuilt sessions recorded the bare model id (issue #42)** — session rebuilds wrote pi's model id into the Claude Code transcript instead of the resolved CLI id, dropping the `[1m]` suffix. Metadata only; the served model and context window come from `--model`, which was already correct.
 - **Tests: harness hygiene** — the unit suite redirects the debug log via a preloaded `tests/lib/setup.mjs` so no test can write to the real bridge log, and the integration harness now fails fast when `~/.claude` is unwritable instead of surfacing a confusing resume error much later. Bash integration scripts autoload `.env.test` like the RPC harness already did, and two assertions that depended on model whim were dropped or tightened.
+- **Internal: typebox is a peer dependency** — pi bundles typebox and its extension loader always aliases the import to that copy, so shipping our own `^1.3.0` in `dependencies` only made consumers install a redundant one that pi ignores. Now `peerDependencies: "*"` plus a devDependency for typechecking, as pi's packaging docs require; dev peers track pi 0.83.0.
 
 ## 0.6.3 — 2026-07-26
 
