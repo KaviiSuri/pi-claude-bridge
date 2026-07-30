@@ -121,36 +121,6 @@ scanners with `--since <date of last good run>` before assuming any of it is sta
 
 ## Testing Gaps
 
-- **`int-session-resume` Turn 8 flake (low priority)**: The isolated-AskClaude
-  assertion fails intermittently (~1-in-5). The alt provider invokes AskClaude
-  with a verbatim prompt in some runs (test passes — isolated CC correctly
-  returns "UNKNOWN") but may embed the secret word into the prompt in others
-  (test fails — but the leak is in the calling model, not in our isolation).
-  We confirmed the verbatim case from logs; the failing case wasn't captured
-  before the next run overwrote the log. Either pin the alt model to one with
-  strict prompt fidelity, or instrument the test to assert on the AskClaude
-  prompt args (not just the response) so we can distinguish "calling model
-  embedded the answer" from a real bridge-side context leak.
-
-- **No replay fixtures from real SDK streams**: Every unit test of
-  `consumeQuery` hand-writes the SDK messages it feeds in, so they only cover
-  shapes we already knew to expect — a stream event CC starts emitting (or
-  stops emitting) is invisible until an int test happens to trip over it.
-  `tests/int-cc-contracts.mjs` pins the shapes we depend on, but nothing
-  captures a whole stream. Fix: record the raw SDK message sequence from one
-  real turn per scenario (plain text, parallel tools, steer mid-tool, error
-  result) into `tests/fixtures/`, and replay them through `consumeQuery`.
-  Scrub args and text the way `pi-history-310.jsonl` is scrubbed.
-
-- **Nothing asserts the int suite runs warning-free**: `deliverToolResults`
-  logs `WARNING:`/`BUG:` lines (stranded handlers, both maps non-empty,
-  steer with no prompt stream) that mean a real defect, and the int suite can
-  emit them while still passing — the stuck-handler bug shipped that way.
-  Fix: fail an int run whose debug log contains `BUG:` or an unexpected
-  `WARNING:`, with an explicit allowlist for the tests that induce one on
-  purpose. `diag/audit-warnings.mjs` already parses these lines; the gap is
-  that no test consults it.
-
 - **Structured diagnostics for tests**: Tests grep debug-log strings to verify
   internal state. The `syncResult:` marker added on `simplify-session-sync`
   narrows this for session sync (tests parse a single targeted line per
