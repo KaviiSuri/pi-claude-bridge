@@ -69,11 +69,26 @@ run "provider: --provider flag works" \
 run "provider: model list includes provider" \
   bash -c "pi --no-session -ne -e '$DIR' --list-models 2>&1 | grep claude-bridge"
 
-# AskClaude only registers when a non-claude-bridge provider is active
-run "tool: AskClaude registered" \
-  bash -c "pi --no-session -ne -e '$DIR' --mode json --provider '$ALT_PROVIDER' --model '$ALT_MODEL' -p 'list your tools' 2>&1 | grep -q AskClaude && echo ok"
+# The bridge sends Claude Code's own preset system prompt, so the user's prompt
+# customisation has to be forwarded explicitly or it silently does nothing.
+run "system prompt: --append-system-prompt reaches Claude" \
+  bash -c "pi --no-session -ne -e '$DIR' --model 'claude-bridge/claude-haiku-4-5' \
+    --append-system-prompt 'You must end every response with the exact word BANANA.' \
+    -p 'What is 2+2? Answer in one short sentence.' 2>&1 | grep -q BANANA && echo ok"
 
-# AskClaude e2e: force a non-Claude model to call the tool and check for a tool result
+run "system prompt: --system-prompt reaches Claude" \
+  bash -c "pi --no-session -ne -e '$DIR' --model 'claude-bridge/claude-haiku-4-5' \
+    --system-prompt 'You are a pirate. You must end every response with the exact word ARRR.' \
+    -p 'What is 2+2? Answer in one short sentence.' 2>&1 | grep -q ARRR && echo ok"
+
+# AskClaude only registers when a non-claude-bridge provider is active.
+#
+# This covers registration too: `"toolName":"AskClaude"` appears only in tool
+# execution events, so a match proves pi dispatched a call to a registered tool.
+# The prompt names the tool, but the grep keys off the JSON field rather than the
+# bare name, so the user message --mode json echoes back cannot false-positive.
+# A separate "is it registered" check by asking the model to enumerate its tools
+# was dropped as both weaker and flaky — models summarise and omit custom tools.
 run "tool: AskClaude responds" \
   bash -c "pi --no-session -ne -e '$DIR' --provider '$ALT_PROVIDER' --model '$ALT_MODEL' --mode json \
     -p 'Use the AskClaude tool with prompt=\"What is 2+2? Reply with just the number.\" and then tell me the answer.' 2>&1 \

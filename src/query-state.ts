@@ -40,6 +40,17 @@ export class QueryContext {
 		return this.turnOutput.content;
 	}
 
+	/** Answer every parked MCP handler with `reason` and forget the turn's queued
+	 *  results. Called when the query it belongs to is going away (abort, error,
+	 *  normal end). Handlers must be *resolved*, not rejected: an error reply is
+	 *  still a reply, and a handler left awaiting a subprocess that is gone keeps
+	 *  CC's tools/call open forever, which wedges pi's turn behind it. */
+	releasePendingToolCalls(reason: string): void {
+		for (const pending of this.pendingToolCalls.values()) pending.resolve({ content: [{ type: "text", text: reason }] });
+		this.pendingToolCalls.clear();
+		this.pendingResults.clear();
+	}
+
 	resetTurnState(model: Model<any>): void {
 		this.turnOutput = {
 			role: "assistant", content: [],

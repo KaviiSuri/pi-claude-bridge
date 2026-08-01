@@ -9,7 +9,7 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { makePromptStream, userMessage } from "../src/prompt-stream.ts";
+import { makePromptStream, userMessage } from "../src/prompt-stream.js";
 
 const text = (msg) => msg.message.content[0].text;
 
@@ -104,6 +104,41 @@ describe("makePromptStream", () => {
 		})();
 
 		await assert.rejects(ps.push(userMessage([{ type: "text", text: "abandoned" }])), /closed/);
+		await pumping;
+	});
+
+	it("rejects a push made after the consumer abandoned the stream", async () => {
+		const ps = makePromptStream();
+		const pumping = (async () => {
+			for await (const _msg of ps.stream) break;
+		})();
+		await assert.rejects(ps.push(userMessage([{ type: "text", text: "abandoned" }])), /closed/);
+		await pumping;
+
+		// Nothing is left to drain the queue, so this has to reject rather than
+		// park — a parked ack wedges tool-result delivery forever.
+		await assert.rejects(
+			Promise.race([
+				ps.push(userMessage([{ type: "text", text: "later" }])),
+				new Promise((_, r) => setTimeout(() => r(new Error("push hung")), 200)),
+			]),
+			/closed/,
+		);
+	});
+
+	it("keeps the first failure rather than the last", async () => {
+		const ps = makePromptStream();
+		// fail() propagates into the generator, so the pump rejects too.
+		const pumping = assert.rejects(pump(ps.stream, () => {}), /CLI exited with code 1/);
+		const queued = ps.push(userMessage([{ type: "text", text: "queued" }]));
+
+		// The provider's catch reports the real cause, then its finally fails the
+		// stream again with a generic message.
+		ps.fail(new Error("CLI exited with code 1"));
+		ps.fail(new Error("query ended"));
+
+		await assert.rejects(queued, /CLI exited with code 1/);
+		await assert.rejects(ps.push(userMessage([{ type: "text", text: "after" }])), /CLI exited with code 1/);
 		await pumping;
 	});
 });

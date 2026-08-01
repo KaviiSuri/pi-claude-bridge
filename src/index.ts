@@ -1,7 +1,7 @@
 import { calculateCost, StringEnum, type AssistantMessage, type AssistantMessageEventStream, type Context, type ImageContent, type Model, type SimpleStreamOptions, type TextContent, type Tool, type UserMessage } from "@earendil-works/pi-ai";
 import * as piAi from "@earendil-works/pi-ai";
 import { getModels } from "@earendil-works/pi-ai/compat";
-import { buildSessionContext, compact, keyHint, type CompactionEntry, type ExtensionAPI, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import { buildSessionContext, compact, keyHint, type CompactionEntry, type ExtensionAPI, type ExtensionContext, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { query, type EffortLevel, type SDKMessage, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
 import type { Base64ImageSource, ContentBlockParam } from "@anthropic-ai/sdk/resources";
 import { Type } from "typebox";
@@ -16,7 +16,7 @@ import { MCP_SERVER_NAME, MCP_TOOL_PREFIX, extractSkillsBlock } from "./skills.j
 import { verifyWrittenSession as _verifyWrittenSession } from "./session-verify.js";
 import { extractAllToolResults as _extractAllToolResults, type McpResult } from "./extract-tool-results.js";
 import { QueryContext, ctx } from "./query-state.js";
-import { makePromptStream, userMessage } from "./prompt-stream.js";
+import { makePromptStream, userMessage, type PromptStream } from "./prompt-stream.js";
 import { loadConfig, markStartupNoticeShown, type Config } from "./config.js";
 import { extractAgentsAppend } from "./agents-md.js";
 import { createToolServer } from "./mcp-server.js";
@@ -35,6 +35,32 @@ const newAssistantMessageEventStream: () => AssistantMessageEventStream =
 const DEBUG = process.env.CLAUDE_BRIDGE_DEBUG === "1";
 const DEBUG_LOG_PATH = process.env.CLAUDE_BRIDGE_DEBUG_PATH || join(homedir(), ".pi", "agent", "claude-bridge.log");
 const DIAG_LOG_PATH = join(homedir(), ".pi", "agent", "claude-bridge-diag.log");
+
+// CLAUDE_BRIDGE_RECORD_STREAM=<path> appends every SDK message consumeQuery sees,
+// one JSON object per line. Used by tests/lib/record-sdk-streams.mjs to capture
+// replay fixtures, so unit tests assert against message shapes Claude Code really
+// emitted rather than ones we imagined.
+const RECORD_STREAM_PATH = process.env.CLAUDE_BRIDGE_RECORD_STREAM;
+
+// Applied to every Claude Code subprocess the bridge spawns — provider, AskClaude
+// and the compact summary. One place, so a guard is added once rather than three
+// times, and so a missing one is visible.
+//
+// - ENABLE_CLAUDEAI_MCP_SERVERS=0: keep the user's claude.ai-connected MCP servers
+//   out of a pi session, which serves its own tools.
+// - DISABLE_AUTO_COMPACT=1: pi owns compaction; CC compacting its own copy would
+//   diverge from pi's history, which is the source of truth for every rebuild.
+// - CLAUDE_CODE_DISABLE_AUTO_MEMORY=1: without it CC forks an extract-memories
+//   agent at turn end that appends to `<claude config>/memory/MEMORY.md` and topic
+//   files under the project. That agent runs its own tools, so `tools: []` does not
+//   stop it, and the effect is a pi conversation silently writing into the user's
+//   Claude Code memory as though it had been an interactive CC session. pi has its
+//   own memory; the bridge must not populate CC's.
+const CC_CHILD_ENV = {
+	ENABLE_CLAUDEAI_MCP_SERVERS: "0",
+	DISABLE_AUTO_COMPACT: "1",
+	CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
+} as const;
 
 // Ensure log directories exist when debug is enabled
 if (DEBUG) {
@@ -113,6 +139,8 @@ function diagDump(label: string, data: Record<string, unknown>) {
 // registration can occur for the next session.
 const ACTIVE_STREAM_SIMPLE_KEY = Symbol.for("claude-bridge:activeStreamSimple");
 
+// Claude Code's own builtin tools, for the AskClaude path where CC really runs
+// them. The provider path never sees these — it starts CC with `tools: []`.
 const SDK_TO_PI_TOOL_NAME: Record<string, string> = {
 	read: "read", write: "write", edit: "edit", bash: "bash",
 };
@@ -335,11 +363,15 @@ function extractIsolatedSummaryPrompt(messages: Context["messages"]): string {
 	return promptText;
 }
 
-function resultErrorText(message: SDKMessage): string {
-	const result = message as SDKMessage & { subtype?: string; errors?: unknown; error?: unknown };
-	if (Array.isArray(result.errors)) return result.errors.map(String).join("\n");
+/** Failure text for an SDK result, or undefined when it succeeded. CC reports API failures
+ *  (429 capacity, overload, prompt-too-long) with `is_error` on an otherwise success-shaped
+ *  result; the dedicated error subtypes carry `errors` instead. */
+function resultErrorText(message: SDKMessage): string | undefined {
+	const result = message as SDKMessage & { subtype?: string; is_error?: boolean; result?: string; errors?: unknown; error?: unknown };
+	if (result.subtype === "success") return result.is_error ? result.result || "Claude Code reported an error" : undefined;
+	if (Array.isArray(result.errors) && result.errors.length) return result.errors.map(String).join("\n");
 	if (typeof result.error === "string") return result.error;
-	return `Claude Code summary failed: ${result.subtype ?? "unknown result"}`;
+	return `Claude Code failed: ${result.subtype ?? "unknown result"}`;
 }
 
 function isolatedStreamFn(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
@@ -373,7 +405,7 @@ async function runIsolatedSummary(
 			prompt: promptText,
 			options: {
 				cwd,
-				env: { ...process.env, DISABLE_AUTO_COMPACT: "1", CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1" },
+				env: { ...process.env, ...CC_CHILD_ENV },
 				tools: [],
 				strictMcpConfig: true,
 				settingSources: [] as SettingSource[],
@@ -410,11 +442,8 @@ async function runIsolatedSummary(
 				}
 			} else if (message.type === "result") {
 				logServedContextWindow("compact summary", message, model);
-				if (message.subtype === "success") {
-					finalText = message.result || assistantText;
-				} else {
-					errorText = resultErrorText(message);
-				}
+				errorText = resultErrorText(message);
+				if (!errorText && message.subtype === "success") finalText = message.result || assistantText;
 			}
 		}
 
@@ -569,10 +598,20 @@ function syncSharedSession(
 			return { sessionId: sharedSession.sessionId };
 		}
 	}
+	// This is what keeps a reentrant subagent from taking over the parent's
+	// session: a subagent starts with priors of its own, shorter than the parent's
+	// cursor, so it lands here, gets a fresh session, and the ephemeral session it
+	// captures is deleted once its query completes (see preserveSharedSession in
+	// the completion handler). Remove this branch and a subagent resumes — then
+	// overwrites — the parent's session. The non-isolated AskClaude path reaches it
+	// the same way.
+	//
+	// It is NOT, despite an earlier comment here, the isolated compact-summary
+	// path: runIsolatedSummary never calls syncSharedSession at all.
+	//
 	// Only reachable when needsRebuild is false — user-facing history rewrites
 	// (/compact, session_tree, /new, fork) always set needsRebuild or clear
-	// sharedSession before the next syncSharedSession call. In practice this
-	// fires only for isolated compact-summary subprocesses.
+	// sharedSession before the next syncSharedSession call.
 	if (sharedSession && !sharedSession.needsRebuild && priorMessages.length < sharedSession.cursor) {
 		debug(`Case 1 synthetic: clean start for shorter context, preserving shared session ${sharedSession.sessionId.slice(0, 8)}, cursor=${sharedSession.cursor}`);
 		debug(`syncResult: path=clean-start preserve-shared sessionId=${sharedSession.sessionId} cursor=${sharedSession.cursor}`);
@@ -632,20 +671,37 @@ export const __test = {
 	},
 	syncSharedSession,
 	extractUserPromptBlocks,
+	consumeQuery,
+	finalizeCurrentStream,
+	resultErrorText,
+	deliverToolResults,
+	drainForAbort,
+	CC_CHILD_ENV,
+	buildMcpServers,
 };
 
 // --- Provider helpers: tool name mapping ---
 
-function mapToolName(name: string, customToolNameToPi?: Map<string, string>): string {
+// AskClaude path: CC runs its own tools, so builtin names are real.
+function mapToolName(name: string): string {
 	const normalized = name.toLowerCase();
 	const builtin = SDK_TO_PI_TOOL_NAME[normalized];
 	if (builtin) return builtin;
-	if (customToolNameToPi) {
-		const mapped = customToolNameToPi.get(name) ?? customToolNameToPi.get(normalized);
-		if (mapped) return mapped;
-	}
 	if (normalized.startsWith(MCP_TOOL_PREFIX)) return name.slice(MCP_TOOL_PREFIX.length);
 	return name;
+}
+
+// Provider path: the query runs with `tools: []`, so the only tools CC can
+// legitimately call are the pi tools we serve over MCP. Any other name is the
+// model hallucinating a builtin (`bash`, `Bash`, `Edit`, an MCP server we don't
+// serve). CC answers those itself with "No such tool available" and retries
+// inside the same query, never dispatching them to our MCP server — so a tool
+// call under such a name must not reach pi. Forwarding one ran a tool CC never
+// dispatched (real side effects) and, because the retry carries a fresh
+// tool_use id, left the handler for the retry with no result to release it:
+// pi's result arrived keyed to the dead id, and both sides deadlocked.
+function piToolNameFor(name: string, customToolNameToPi: Map<string, string>): string | undefined {
+	return customToolNameToPi.get(name) ?? customToolNameToPi.get(name.toLowerCase());
 }
 
 // Renames for Claude Code SDK param names that differ from pi's native names.
@@ -681,7 +737,34 @@ function mapToolArgs(
 
 // Global (not query state):
 let piUI: ExtensionUIContext | null = null;
+let piMode: ExtensionContext["mode"] | null = null;
 const activeQueryContexts = new Set<QueryContext>();
+
+// `plan` is the one setting whose default silently costs the user something (no
+// Opus 1M on Max), so announce it once. Deferred to the first bridge query
+// rather than session_start: the notice persists a flag to the global config,
+// and firing it on startup would write that file for every pi session that
+// merely has this extension installed.
+let planNoticePending = false;
+
+function showPlanNoticeOnce(): void {
+	// `hasUI` is true in RPC mode too — it means dialogs are possible, not that a
+	// human is watching. Only a terminal user can act on this.
+	if (!planNoticePending || piMode !== "tui") return;
+	planNoticePending = false;
+	const path = markStartupNoticeShown();
+	piUI?.notify(
+		`Claude bridge: assuming a Pro plan. On Max (or Team Premium/Enterprise), set provider.plan to "max" in ${path} to unlock Opus at 1M context.`,
+		"info",
+	);
+}
+
+// The user's own system prompt customisation (`--system-prompt`,
+// `--append-system-prompt`), captured from before_agent_start. pi's assembled
+// `context.systemPrompt` can't be forwarded wholesale — it describes pi's tools
+// and harness and would fight Claude Code's own preset — but the user's text is
+// theirs and has to reach the model, so it is kept separately.
+let userSystemPrompt: { custom?: string; append?: string } = {};
 
 function contextForToolResults(results: McpResult[]): QueryContext | undefined {
 	for (const result of results) {
@@ -846,9 +929,13 @@ function finalizeCurrentStream(c: QueryContext, stopReason?: string): void {
 	if (!c.currentPiStream || !c.turnOutput) return;
 	debug(`provider: finalizeCurrentStream called, stopReason=${stopReason}, turnOutput=${JSON.stringify({stopReason: c.turnOutput!.stopReason, error: c.turnOutput!.errorMessage})}`);
 	if (!c.turnStarted) ensureTurnStarted(c);
-	const reason = stopReason === "length" ? "length" : "stop";
 	const stream = c.currentPiStream;
-	stream!.push({ type: "done", reason, message: c.turnOutput });
+	if (c.turnOutput.stopReason === "error") {
+		stream!.push({ type: "error", reason: "error", error: c.turnOutput });
+	} else {
+		const reason = stopReason === "length" ? "length" : "stop";
+		stream!.push({ type: "done", reason, message: c.turnOutput });
+	}
 	markStreamComplete(stream);
 	stream!.end();
 	c.currentPiStream = null;
@@ -881,11 +968,16 @@ function processStreamEvent(
 			c.turnBlocks.push({ type: "thinking", thinking: "", thinkingSignature: "", index: event.index });
 			c.currentPiStream!.push({ type: "thinking_start", contentIndex: c.turnBlocks.length - 1, partial: c.turnOutput });
 		} else if (event.content_block?.type === "tool_use") {
+			const piName = piToolNameFor(event.content_block.name, customToolNameToPi);
+			if (!piName) {
+				debug(`processStreamEvent: skipping tool_use for unserved tool ${event.content_block.name} [${event.content_block.id}] — CC rejects it and retries`);
+				return;
+			}
 			c.turnSawToolCall = true;
 			c.turnToolCallIds.push(event.content_block.id);
 			c.turnBlocks.push({
 				type: "toolCall", id: event.content_block.id,
-				name: mapToolName(event.content_block.name, customToolNameToPi),
+				name: piName,
 				arguments: (event.content_block.input as Record<string, unknown>) ?? {},
 				partialJson: "", index: event.index,
 			});
@@ -994,14 +1086,18 @@ function processAssistantMessage(message: SDKMessage, model: Model<any>, customT
 			if (block.thinking) c.currentPiStream?.push({ type: "thinking_delta", contentIndex: idx, delta: block.thinking, partial: c.turnOutput });
 			c.currentPiStream?.push({ type: "thinking_end", contentIndex: idx, content: block.thinking ?? "", partial: c.turnOutput });
 		} else if (block.type === "tool_use") {
+			const piName = piToolNameFor(block.name, customToolNameToPi);
+			if (!piName) {
+				debug(`processAssistantMessage: skipping tool_use for unserved tool ${block.name} [${block.id}] — CC rejects it and retries`);
+				continue;
+			}
 			ensureTurnStarted(c);
 			c.turnSawToolCall = true;
 			c.turnToolCallIds.push(block.id);
-			const mappedArgs = mapToolArgs(mapToolName(block.name, customToolNameToPi), block.input);
 			c.turnBlocks.push({
 				type: "toolCall", id: block.id,
-				name: mapToolName(block.name, customToolNameToPi),
-				arguments: mappedArgs,
+				name: piName,
+				arguments: mapToolArgs(piName, block.input),
 			});
 			const idx = c.turnBlocks.length - 1;
 			const toolBlock = c.turnBlocks[idx];
@@ -1039,11 +1135,44 @@ async function consumeQuery(
 	let capturedSessionId: string | undefined;
 
 	for await (const message of sdkQuery) {
+		if (RECORD_STREAM_PATH) appendFileSync(RECORD_STREAM_PATH, `${JSON.stringify(message)}\n`);
 		if (wasAborted()) break;
-		// Ahead of the currentPiStream guard: nothing else closes the CLI's stdin
-		// now that the prompt is a streamed generator (isSingleUserTurn=false), so
-		// missing this would hang the query forever.
-		if (message.type === "result") queryCtx.promptStream?.end();
+		// Everything below the currentPiStream guard is content, which there is
+		// nowhere to put once a turn has ended on a tool call. These three are not
+		// content and must not share that gate:
+		//
+		// - stdin: nothing else closes the CLI's stdin now that the prompt is a
+		//   streamed generator (isSingleUserTurn=false), so missing this hangs the query.
+		// - the failure a `result` carries: it is the only record that the turn
+		//   failed at all. Behind the guard, a 429 arriving at a tool boundary set
+		//   no stopReason, no errorMessage, and logged nothing — the turn simply
+		//   ended empty.
+		// - rate-limit events: notifications to the user, which are most likely to
+		//   fire during exactly the long tool-using turns the guard was skipping.
+		let resultError: string | undefined;
+		if (message.type === "result") {
+			queryCtx.promptStream?.end();
+			logServedContextWindow("result", message, model);
+			resultError = resultErrorText(message);
+			if (resultError !== undefined) {
+				debug(`consumeQuery: error result, subtype=${message.subtype}, error=${resultError}`);
+				if (queryCtx.turnOutput) {
+					queryCtx.turnOutput.stopReason = "error";
+					queryCtx.turnOutput.errorMessage = resultError;
+				}
+			}
+		}
+		if (message.type === "rate_limit_event") {
+			const info = (message as any).rate_limit_info;
+			debug("consumeQuery: rate_limit_event", JSON.stringify(info).slice(0, 300));
+			if (info?.status === "rejected") {
+				const resetsAt = info.resetsAt ? new Date(info.resetsAt).toLocaleTimeString() : "unknown";
+				piUI?.notify(`Claude rate limited (${info.rateLimitType ?? "unknown"}) — resets at ${resetsAt}`, "warning");
+			} else if (info?.status === "allowed_warning") {
+				piUI?.notify(`Claude rate limit warning: ${Math.round(info.utilization ?? 0)}% used (${info.rateLimitType ?? ""})`, "warning");
+			}
+			continue;
+		}
 		if (!queryCtx.currentPiStream || !queryCtx.turnOutput) continue;
 
 		switch (message.type) {
@@ -1053,9 +1182,11 @@ async function consumeQuery(
 			case "assistant":
 				processAssistantMessage(message, model, customToolNameToPi, queryCtx);
 				break;
-			case "result":
-				logServedContextWindow("result", message, model);
-				if (!queryCtx.turnSawStreamEvent && message.subtype === "success") {
+			case "result": {
+					// The failure itself was recorded above the guard, along with the served
+					// context window. What is left here is the success path: push the result
+					// text when no assistant message already delivered it.
+					if (resultError === undefined && !queryCtx.turnSawStreamEvent && message.subtype === "success") {
 					ensureTurnStarted(queryCtx);
 					const text = message.result || "";
 					queryCtx.turnBlocks.push({ type: "text", text });
@@ -1065,6 +1196,7 @@ async function consumeQuery(
 					queryCtx.currentPiStream?.push({ type: "text_end", contentIndex: idx, content: text, partial: queryCtx.turnOutput });
 				}
 				break;
+			}
 			case "system":
 				if ((message as any).subtype === "init" && (message as any).session_id) {
 					capturedSessionId = (message as any).session_id;
@@ -1078,17 +1210,6 @@ async function consumeQuery(
 				// is why the mid-turn steering tripwire has to live in the
 				// integration test.
 				break;
-			case "rate_limit_event": {
-				const info = (message as any).rate_limit_info;
-				debug("consumeQuery: rate_limit_event", JSON.stringify(info).slice(0, 300));
-				if (info?.status === "rejected") {
-					const resetsAt = info.resetsAt ? new Date(info.resetsAt).toLocaleTimeString() : "unknown";
-					piUI?.notify(`Claude rate limited (${info.rateLimitType ?? "unknown"}) — resets at ${resetsAt}`, "warning");
-				} else if (info?.status === "allowed_warning") {
-					piUI?.notify(`Claude rate limit warning: ${Math.round(info.utilization ?? 0)}% used (${info.rateLimitType ?? ""})`, "warning");
-				}
-				break;
-			}
 			default:
 				debug("consumeQuery: unhandled SDK message type", message.type);
 				break;
@@ -1182,9 +1303,19 @@ async function deliverToolResults(
 	}
 }
 
+/** Abort teardown for one query: settle everything that would otherwise be left
+ *  awaiting a subprocess we are about to kill. The pump abandons iteration on
+ *  abort, so an in-flight prompt-stream push would hang forever and take
+ *  tool-result delivery with it. */
+function drainForAbort(c: QueryContext, promptStream: PromptStream): void {
+	promptStream.fail(new Error("Operation aborted"));
+	c.releasePendingToolCalls("Operation aborted");
+}
+
 /** Provider entry point. Pi calls this for each new prompt and each tool result.
  *  Two cases: tool result delivery (active query) or fresh query. */
 function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
+	showPlanNoticeOnce();
 	const stream = newAssistantMessageEventStream();
 
 	// DEBUG: trace followUp message triggering
@@ -1214,7 +1345,11 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		// tool result does — see deliverToolResults. Detached so the provider
 		// still returns its stream synchronously.
 		void deliverToolResults(resultCtx, allResults, steer, context.messages.length);
-		if (sharedSession) sharedSession.cursor = context.messages.length;
+		// The shared cursor tracks the top-level conversation. A reentrant subagent
+		// delivering its own results would drag it to that subagent's message count
+		// — observed pulling a parent from 5 back to 3, which cost the parent's next
+		// turn a full rebuild and a flushed prompt cache.
+		if (sharedSession && resultCtx === ctx()) sharedSession.cursor = context.messages.length;
 		resultCtx.latestCursor = Math.max(resultCtx.latestCursor, context.messages.length);
 		return stream;
 	}
@@ -1225,10 +1360,14 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	const lastMsg = context.messages[context.messages.length - 1];
 	if (lastMsg?.role === "toolResult") {
 		debug(`provider: orphaned tool result after abort, emitting end_turn`);
-		if (sharedSession) sharedSession.cursor = context.messages.length;
-		const c = ctx();  // capture current context for the microtask
+		if (sharedSession && activeQueryContexts.size === 0) sharedSession.cursor = context.messages.length;
+		// No query owns this result, so there is no context to reset: resetTurnState
+		// on the top-level ctx() would replace a live parent's turnOutput mid-stream,
+		// stranding the blocks it had already emitted. A throwaway context just
+		// supplies the empty message this turn ends with.
+		const c = new QueryContext();
+		c.resetTurnState(model);
 		queueMicrotask(() => {
-			c.resetTurnState(model);
 			stream.push({ type: "done", reason: "stop", message: c.turnOutput });
 			markStreamComplete(stream);
 			stream.end();
@@ -1258,7 +1397,10 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 
 	const { mcpTools, customToolNameToSdk, customToolNameToPi } = resolveMcpTools(context, askClaudeToolName);
 	const cwd = (options as { cwd?: string } | undefined)?.cwd ?? process.cwd();
-	const syncResult = syncSharedSession(context.messages, cwd, customToolNameToSdk, model.id);
+	// cliModel is the actual id sent to Claude Code (may carry [1m]); model.id is the
+	// pi-registered id. Log cliModel so debug lines reflect what CC actually received.
+	const cliModel = claudeCodeModelId(model, longContextSettings);
+	const syncResult = syncSharedSession(context.messages, cwd, customToolNameToSdk, cliModel);
 	const { sessionId: resumeSessionId } = syncResult;
 	const promptBlocks = extractUserPromptBlocks(context.messages);
 	let promptText = extractUserPrompt(context.messages) ?? "";
@@ -1292,7 +1434,11 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	const appendSystemPrompt = providerSettings.appendSystemPrompt !== false;
 	const agentsAppend = appendSystemPrompt ? extractAgentsAppend() : undefined;
 	const skillsAppend = appendSystemPrompt ? extractSkillsBlock(context.systemPrompt) : undefined;
-	const appendParts = [agentsAppend, skillsAppend].filter((part): part is string => Boolean(part));
+	// Last, so the user's own instructions win over anything the bridge adds, and
+	// ungated by appendSystemPrompt: that setting suppresses context the bridge
+	// injects on its own, not what the user explicitly asked for.
+	const appendParts = [agentsAppend, skillsAppend, userSystemPrompt.custom, userSystemPrompt.append]
+		.filter((part): part is string => Boolean(part));
 	const systemPromptAppend = appendParts.length > 0 ? appendParts.join("\n\n") : undefined;
 
 	// MCP auto-loading suppression: CC reads MCP servers from ~/.claude.json (top-level
@@ -1314,9 +1460,6 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 			?? REASONING_TO_EFFORT[options.reasoning]
 		: undefined;
 
-	// cliModel is the actual id sent to Claude Code (may carry [1m]); model.id is the
-	// pi-registered id. Log cliModel so debug lines reflect what CC actually received.
-	const cliModel = claudeCodeModelId(model, longContextSettings);
 	const extraArgs: Record<string, string | null> = { model: cliModel };
 	if (strictMcpConfigEnabled) extraArgs["strict-mcp-config"] = null;
 	// Opus 4.7 defaults thinking.display to "omitted" (empty thinking text in stream).
@@ -1333,7 +1476,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// also autocompact would double-flush the prompt cache and races pi's
 	// threshold with CC's, including CC's anti-thrashing guard (issue #8).
 	// Manual /compact in CC still works (we never invoke it).
-	const childEnv = { ...process.env, ENABLE_CLAUDEAI_MCP_SERVERS: "0", DISABLE_AUTO_COMPACT: "1" };
+	const childEnv = { ...process.env, ...CC_CHILD_ENV };
 	const queryOptions: NonNullable<Parameters<typeof query>[0]["options"]> = {
 		cwd,
 		env: childEnv,
@@ -1376,13 +1519,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	};
 	const onAbort = () => {
 		wasAborted = true;
-		// Terminate the input generator and settle its acks — the pump abandons
-		// iteration on abort, so an in-flight push would otherwise hang forever
-		// and take tool-result delivery with it.
-		promptStream.fail(new Error("Operation aborted"));
-		for (const pending of abortCtx.pendingToolCalls.values()) { pending.resolve({ content: [{ type: "text", text: "Operation aborted" }] }); }
-		abortCtx.pendingToolCalls.clear();
-		abortCtx.pendingResults.clear();
+		drainForAbort(abortCtx, promptStream);
 		requestAbort();
 	};
 	if (options?.signal) {
@@ -1441,12 +1578,12 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 			promptStream.fail(error instanceof Error ? error : new Error(String(error)));
 			if (queryCtx.turnOutput) {
 				queryCtx.turnOutput.stopReason = options?.signal?.aborted ? "aborted" : "error";
-				queryCtx.turnOutput.errorMessage = error instanceof Error ? error.message : String(error);
+				// The SDK drops its copy of the result text if any message follows the error
+				// result, so prefer the cause consumeQuery recorded off the result itself.
+				queryCtx.turnOutput.errorMessage ??= error instanceof Error ? error.message : String(error);
 			}
 			if (!isReentrant && queryCtx.activeQuery === sdkQuery) {
-				for (const pending of queryCtx.pendingToolCalls.values()) { pending.resolve({ content: [{ type: "text", text: "Query ended" }] }); }
-				queryCtx.pendingToolCalls.clear();
-				queryCtx.pendingResults.clear();
+				queryCtx.releasePendingToolCalls("Query ended");
 				debug("provider: clearing activeQuery before error stream completion");
 				queryCtx.activeQuery = null;
 			}
@@ -1464,13 +1601,13 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 			promptStream.fail(new Error("query ended"));
 			if (queryCtx.promptStream === promptStream) queryCtx.promptStream = null;
 			if (queryCtx.activeQuery === sdkQuery) {
-				// Drain pending handlers for this query
-				for (const pending of queryCtx.pendingToolCalls.values()) { pending.resolve({ content: [{ type: "text", text: "Query ended" }] }); }
-				queryCtx.pendingToolCalls.clear();
-				queryCtx.pendingResults.clear();
+				queryCtx.releasePendingToolCalls("Query ended");
 				queryCtx.activeQuery = null;
+				// Guarded like the two cleanups above: if a later query has already
+				// claimed this context, removing it from the routing set would send
+				// that query's tool results down the orphan path and strand its handler.
+				activeQueryContexts.delete(queryCtx);
 			}
-			activeQueryContexts.delete(queryCtx);
 			sdkQuery.close();
 		});
 
@@ -1513,7 +1650,7 @@ async function promptAndWait(
 		} else {
 			// No provider session yet — create one from pi's context
 			const contextWithPrompt = [...options.context, { role: "user" as const, content: prompt, timestamp: Date.now() }];
-			const sync = syncSharedSession(contextWithPrompt as Context["messages"], cwd, undefined, modelId);
+			const sync = syncSharedSession(contextWithPrompt as Context["messages"], cwd, undefined, cliModel);
 			resumeSessionId = sync.sessionId;
 		}
 	}
@@ -1546,7 +1683,7 @@ async function promptAndWait(
 		prompt,
 		options: {
 			cwd,
-			env: { ...process.env, ENABLE_CLAUDEAI_MCP_SERVERS: "0", DISABLE_AUTO_COMPACT: "1" },
+			env: { ...process.env, ...CC_CHILD_ENV },
 			permissionMode: "bypassPermissions",
 			...(disallowedTools.length ? { disallowedTools } : {}),
 			...(effort ? { effort } : {}),
@@ -1663,9 +1800,7 @@ export default function (pi: ExtensionAPI) {
 	};
 	const registeredModels = applyLongContext(MODELS, longContextSettings);
 
-	// `plan` is the one setting whose default silently costs the user something
-	// (no Opus 1M on Max), so announce it once.
-	let planNoticePending = config.provider?.plan === undefined && !config.startupNoticeShown;
+	planNoticePending = config.provider?.plan === undefined && !config.startupNoticeShown;
 
 	// Reset shared session on pi session lifecycle events
 	const clearSession = (event: string) => {
@@ -1683,17 +1818,17 @@ export default function (pi: ExtensionAPI) {
 	};
 	pi.on("session_start", (event, ctx) => {
 		piUI = ctx.ui;
-		if (planNoticePending && ctx.hasUI) {
-			planNoticePending = false;
-			const path = markStartupNoticeShown();
-			ctx.ui.notify(
-				`Claude bridge: assuming a Pro plan. On Max (or Team Premium/Enterprise), set provider.plan to "max" in ${path} to unlock Opus at 1M context.`,
-				"info",
-			);
-		}
+		piMode = ctx.mode;
 		if (event.reason === "new" || event.reason === "resume" || event.reason === "fork") {
 			clearSession(`session_start:${event.reason}`);
 		}
+	});
+	// `--system-prompt` replaces pi's default rather than adding to it, but Claude
+	// Code's preset carries its own tool and permission guidance that the bridge
+	// still depends on, so both flags are forwarded as an append.
+	pi.on("before_agent_start", (event) => {
+		const options = event.systemPromptOptions;
+		userSystemPrompt = { custom: options?.customPrompt, append: options?.appendSystemPrompt };
 	});
 	pi.on("session_shutdown", () => clearSession("session_shutdown"));
 

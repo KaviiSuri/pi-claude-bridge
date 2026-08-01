@@ -55,7 +55,10 @@ printf "%-6s  %8s  %8s  %8s  %8s  %s\n" "Turn" "Input" "CacheRd" "CacheWr" "Outp
 
 # Thresholds
 MIN_CACHE_HIT_PCT=90
-MIN_EXPECTED_TURNS=7    # 5 prompts + 2 tool sub-turns (write + read)
+# Count tool calls, not turns: how many assistant turns the write and read get
+# split across is the model's choice, but both tools have to run for the prompts
+# to be answered, and it is tool results that exercise the cursor/cache path.
+MIN_EXPECTED_TOOL_CALLS=2   # write + read
 MIN_CASE3_RESUMES=2
 EXPECTED_CASE1=1
 
@@ -99,8 +102,11 @@ done < <(jq -c 'select(.type == "turn_end") | .message.usage | {input, cacheRead
 
 echo "---"
 
-if [ "$TURN" -lt $MIN_EXPECTED_TURNS ]; then
-  echo "FAIL: Only $TURN turns detected (expected >= $MIN_EXPECTED_TURNS with tool use sub-turns)"
+TOOL_CALLS=$(jq -c 'select(.type == "tool_execution_start")' "$LOGFILE" | wc -l | tr -d ' ')
+echo "Tool calls: $TOOL_CALLS (across $TURN turns)"
+if [ "$TOOL_CALLS" -lt $MIN_EXPECTED_TOOL_CALLS ]; then
+  echo "FAIL: Only $TOOL_CALLS tool call(s) (expected >= $MIN_EXPECTED_TOOL_CALLS: the write and the read)"
+  echo "      The model likely answered from context instead of calling the tool."
   FAIL=$((FAIL + 1))
 fi
 

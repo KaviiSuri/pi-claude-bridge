@@ -221,9 +221,14 @@ describe("tool-message integration", () => {
 
 	it("steer at a text-only boundary is not pushed into the active query", { timeout: TEST_TIMEOUT }, async () => {
 		// A steer at the end of a text-only turn can race the clearing of
-		// activeQuery and be routed as a reentrant user query. That must stay a
-		// fresh follow-up query: there is no tool boundary to steer at, and the
-		// input generator has already been ended, so pushing into it would fail.
+		// activeQuery and be routed as a reentrant user query. It cannot be pushed
+		// into the previous query: there is no tool boundary to steer at, and that
+		// query's input generator has already been ended.
+		//
+		// This asserts only that no push is attempted. Landing as a reentrant query
+		// is not itself safe — syncSharedSession takes the REUSE path and a second
+		// CC process --resumes the session while the first is still flushing its
+		// transcript. That race predates mid-turn steering and is untested here.
 		//
 		// Routing makes this unreachable today (no tool results ⇒ no delivery
 		// path), and the race itself is timing-dependent, so read this as a
