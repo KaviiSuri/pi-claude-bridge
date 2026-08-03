@@ -1432,7 +1432,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	queryCtx.promptStream = promptStream;
 	const mcpServers = buildMcpServers(mcpTools, queryCtx);
 	const appendSystemPrompt = providerSettings.appendSystemPrompt !== false;
-	const agentsAppend = appendSystemPrompt ? extractAgentsAppend() : undefined;
+	const agentsAppend = appendSystemPrompt ? extractAgentsAppend(cwd) : undefined;
 	const skillsAppend = appendSystemPrompt ? extractSkillsBlock(context.systemPrompt) : undefined;
 	// Last, so the user's own instructions win over anything the bridge adds, and
 	// ungated by appendSystemPrompt: that setting suppresses context the bridge

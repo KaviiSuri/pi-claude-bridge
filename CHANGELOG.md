@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Fix: mirror Pi context-file instructions** — Claude Code now receives the same global and hierarchical `AGENTS.md` / `CLAUDE.md` files that Pi loads, in the same order, rather than only the nearest `AGENTS.md`.
 - **Add: mid-turn steering** — a steer sent while a tool was running used to be stashed and replayed as a follow-up after Claude's whole turn finished. The prompt is now a long-lived streaming generator and the steer is written to CC's stdin (`priority: "next"`) before the tool result is released, so CC drains it at that tool boundary and acts on it in the same turn.
 - **Add: one-time plan notice** — `provider.plan` defaults to `"pro"`, so Max subscribers silently lost Opus at 1M context. Notifies once, on the first bridge query of an interactive session, when `plan` is unset.
 - **Fix: images dropped from prompts and rebuilt sessions (issue #34)** — an image followed by a trailing text preview lost the image, and tool results carrying images were flattened to text whenever the bridge rewrote pi's history into a Claude Code session. Images survive both paths now; requires cc-session-io `^0.3.2`.
