@@ -17,7 +17,7 @@ import { verifyWrittenSession as _verifyWrittenSession } from "./session-verify.
 import { extractAllToolResults as _extractAllToolResults, type McpResult } from "./extract-tool-results.js";
 import { QueryContext, ctx } from "./query-state.js";
 import { makePromptStream, userMessage, type PromptStream } from "./prompt-stream.js";
-import { loadConfig, markStartupNoticeShown, type Config } from "./config.js";
+import { claudeCodeSettings, loadConfig, markStartupNoticeShown, type Config } from "./config.js";
 import { extractAgentsAppend } from "./agents-md.js";
 import { createToolServer } from "./mcp-server.js";
 import { buildActionSummary, type ToolCallState } from "./askclaude-ui.js";
@@ -50,16 +50,9 @@ const RECORD_STREAM_PATH = process.env.CLAUDE_BRIDGE_RECORD_STREAM;
 //   out of a pi session, which serves its own tools.
 // - DISABLE_AUTO_COMPACT=1: pi owns compaction; CC compacting its own copy would
 //   diverge from pi's history, which is the source of truth for every rebuild.
-// - CLAUDE_CODE_DISABLE_AUTO_MEMORY=1: without it CC forks an extract-memories
-//   agent at turn end that appends to `<claude config>/memory/MEMORY.md` and topic
-//   files under the project. That agent runs its own tools, so `tools: []` does not
-//   stop it, and the effect is a pi conversation silently writing into the user's
-//   Claude Code memory as though it had been an interactive CC session. pi has its
-//   own memory; the bridge must not populate CC's.
 const CC_CHILD_ENV = {
 	ENABLE_CLAUDEAI_MCP_SERVERS: "0",
 	DISABLE_AUTO_COMPACT: "1",
-	CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
 } as const;
 
 // Ensure log directories exist when debug is enabled
@@ -397,7 +390,8 @@ async function runIsolatedSummary(
 	try {
 		const promptText = extractIsolatedSummaryPrompt(context.messages);
 		const cwd = (options as { cwd?: string } | undefined)?.cwd ?? process.cwd();
-		const claudeExecutable = loadConfig(cwd).provider?.pathToClaudeCodeExecutable;
+		const compactProviderSettings = loadConfig(cwd).provider;
+		const claudeExecutable = compactProviderSettings?.pathToClaudeCodeExecutable;
 		const cliModel = claudeCodeModelId(model, longContextSettings);
 		debug(`compact summary: spawn model=${cliModel} registeredModel=${model.id} promptLen=${promptText.length}`);
 
@@ -406,6 +400,7 @@ async function runIsolatedSummary(
 			options: {
 				cwd,
 				env: { ...process.env, ...CC_CHILD_ENV },
+				settings: { autoMemoryEnabled: false },
 				tools: [],
 				strictMcpConfig: true,
 				settingSources: [] as SettingSource[],
@@ -1483,6 +1478,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		tools: [],
 		permissionMode: "bypassPermissions",
 		includePartialMessages: true,
+		settings: claudeCodeSettings(providerSettings),
 		systemPrompt: {
 			type: "preset", preset: "claude_code",
 			append: systemPromptAppend ? systemPromptAppend : undefined,
@@ -1685,6 +1681,7 @@ async function promptAndWait(
 			cwd,
 			env: { ...process.env, ...CC_CHILD_ENV },
 			permissionMode: "bypassPermissions",
+			settings: claudeCodeSettings(providerSettings),
 			...(disallowedTools.length ? { disallowedTools } : {}),
 			...(effort ? { effort } : {}),
 			systemPrompt: skillsBlock

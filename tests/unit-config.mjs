@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readFileSync } from "node:fs";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { loadConfig, markStartupNoticeShown } from "../src/config.js";
+import { claudeCodeSettings, loadConfig, markStartupNoticeShown } from "../src/config.js";
 
 function withTempHome(fn) {
 	const oldHome = process.env.HOME;
@@ -19,6 +19,16 @@ function withTempHome(fn) {
 		rmSync(home, { recursive: true, force: true });
 	}
 }
+
+describe("claudeCodeSettings", () => {
+	it("disables auto-memory by default", () => {
+		assert.deepEqual(claudeCodeSettings(), { autoMemoryEnabled: false });
+	});
+
+	it("allows auto-memory to be enabled", () => {
+		assert.deepEqual(claudeCodeSettings({ autoMemoryEnabled: true }), { autoMemoryEnabled: true });
+	});
+});
 
 describe("loadConfig", () => {
 	it("loads project config from Pi's configured project directory", () => withTempHome(() => {
@@ -53,13 +63,13 @@ describe("loadConfig", () => {
 				askClaude: { enabled: true, defaultMode: "read" },
 			}));
 			writeFileSync(join(projectDir, "claude-bridge.json"), JSON.stringify({
-				provider: { plan: "max" },
+				provider: { plan: "max", autoMemoryEnabled: true },
 				askClaude: { enabled: false },
 			}));
 
 			assert.deepEqual(loadConfig(cwd), {
 				startupNoticeShown: undefined,
-				provider: { plan: "max", strictMcpConfig: true },
+				provider: { plan: "max", strictMcpConfig: true, autoMemoryEnabled: true },
 				askClaude: { enabled: false, defaultMode: "read" },
 			});
 		} finally {

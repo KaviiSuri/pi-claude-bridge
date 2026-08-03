@@ -27,6 +27,7 @@ export interface Config {
 		appendSystemPrompt?: boolean;
 		settingSources?: SettingSource[];
 		strictMcpConfig?: boolean;
+		autoMemoryEnabled?: boolean;
 		pathToClaudeCodeExecutable?: string;
 		// Subscription plan tier. Setting to "max" enables Opus 4.6 at 1M context
 		plan?: "pro" | "max";
@@ -45,6 +46,10 @@ export function tryParseJson(path: string): Partial<Config> {
 		console.error(`claude-bridge: failed to parse ${path}: ${e}`);
 		return {};
 	}
+}
+
+export function claudeCodeSettings(provider: Config["provider"] = {}): { autoMemoryEnabled: boolean } {
+	return { autoMemoryEnabled: provider.autoMemoryEnabled ?? false };
 }
 
 export function globalConfigPath(): string {
