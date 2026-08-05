@@ -1,13 +1,7 @@
-// Pi owns context-file discovery. Reuse its public loader so Claude receives
-// the same global and hierarchical AGENTS.md/CLAUDE.md instructions as Pi.
-
-import { getAgentDir, loadProjectContextFiles } from "@earendil-works/pi-coding-agent";
+// Pi owns context-file discovery; the bridge only formats the list Pi loaded so
+// Claude receives the same instructions, in the same order, that Pi applies.
 
 type ContextFile = { path: string; content: string };
-
-export function extractAgentsAppend(cwd: string = process.cwd()): string | undefined {
-	return formatProjectContext(loadProjectContextFiles({ cwd, agentDir: getAgentDir() }));
-}
 
 export function formatProjectContext(contextFiles: ContextFile[]): string | undefined {
 	if (contextFiles.length === 0) return undefined;

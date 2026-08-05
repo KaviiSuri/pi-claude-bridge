@@ -20,9 +20,13 @@ block per record while cc-session-io stores one record per message.
 Better still, prove it with a live probe. `tests/int-cc-contracts.mjs` pins each
 undocumented behavior we depend on against the installed CC/SDK and is the right
 home for a new assumption; `diag/capture-proxy.mjs` captures the actual request
-bodies when the question is what CC sends. Also check the vendored source's version
-— `claude-code-rip/` runs ahead of the installed CLI, so a function that exists
-there may not ship yet.
+bodies when the question is what CC sends. `claude-code-rip/` lags the installed
+CLI by an unknown margin, so read it for mechanism, never for current behavior:
+what it gates, defaults, or omits may already have changed. And before
+reverse-engineering an SDK option at all, grep
+`node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts` — it documents every
+settings field, several of which solve problems the CC source makes look
+intractable.
 
 The same skepticism applies to any *rate* computed from the debug log. Before
 believing one, check the metric against a case whose answer you know: the
