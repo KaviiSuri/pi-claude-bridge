@@ -73,13 +73,20 @@ No repro, so there is nothing to write yet. Re-run the scanners with
 `--since <date of last good run>`; `diag/AUDIT.md` holds the evidence.
 
 - **~25% of `--resume` boundaries re-send the whole conversation** (12.9M tokens,
-  recomputed with the corrected metric) — unexplained and unattributed. 33
-  bridge-free boundaries at 45–85k prompts on Haiku came back 0 cold, so the
-  controlled runs neither implicate nor exonerate CC; the audited failures are
-  `claude-opus-5[1m]` at `xhigh` with 100–400k prompts collapsing to 2–13% cache
-  hit. Next step is to leave `diag/capture-proxy.mjs` on during a real session of
-  that shape rather than paying to synthesize one. **Also recompute the
-  dose-response table**, which was built on the metric's false-positive mode.
+  recomputed with the corrected metric) — unexplained and unattributed. Two
+  controlled runs now come back 0 cold: 33 bridge-free boundaries at 45–85k prompts
+  on Haiku, and 90 bridge boundaries at 13k (15 `int-cache.sh` runs under
+  `diag/capture-proxy.mjs`). Neither implicates nor exonerates CC; the audited
+  failures are `claude-opus-5[1m]` at `xhigh` with 100–400k prompts collapsing to
+  2–13% cache hit, a regime neither control approaches. Next step is still to leave
+  the proxy on during a real session of that shape rather than paying to synthesize
+  one. **Also recompute the dose-response table**, which was built on the metric's
+  false-positive mode.
+
+  The one cold boundary seen outside the proxy has not recurred; it differed from the
+  clean runs only in how turn 1 attached to the preceding stages' prefix (see
+  `diag/AUDIT.md`). If chased again, loop the whole `smoke → multi-turn → cache`
+  chain — looping `int-cache.sh` alone cannot reproduce that state.
 
 - **4 stranded MCP handlers and 7 orphan queued results** (of 32 and 14; the rest
   are accounted for by abort/shutdown or the phantom-tool bug). Each of the 4 is a
@@ -154,6 +161,12 @@ No repro, so there is nothing to write yet. Re-run the scanners with
   decision instead of the old Case-1/2/3/4 labels), but it's still grep-based.
   A proper diagnostic channel (NDJSON or dedicated diagLog entries) would be
   cleaner and resilient to log-format churn.
+
+- **`int-cache.sh` asserts on model whim**: the run fails with `Only 1 tool call(s)
+  (expected >= 2)` when Haiku answers the read prompt from context instead of
+  calling the tool. Observed once in 15 runs. The tool-call count is a proxy for
+  "the cursor/cache path got exercised", so it cannot simply be dropped; making the
+  prompt harder to satisfy from context would be the fix.
 
 - **verifyWrittenSession failure paths untested**: The helper throws on
   missing file / record-count mismatch / malformed JSONL / sessionId drift,

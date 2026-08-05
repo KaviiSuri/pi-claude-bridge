@@ -251,34 +251,20 @@ message. A further 39% cache nothing at all (`cacheRead=0`), implicating the
 preamble too. Break rate is flat across prefix sizes (<20k through >200k) and
 across models, so it is not a large-context or model-specific effect.
 
-#### It correlates with how many records CC appended during the previous query
+#### Withdrawn: the correlation with CC's appended-record count
 
-Every bridge turn crosses a `--resume` boundary, and during the *previous* query
-Claude Code appends its own live records to the session file — one per content
-block, one per tool result. On the next resume CC reads those back and rebuilds
-the API messages from them. If that disk round-trip is not byte-faithful, the
-prefix diverges exactly where the conversation starts, which is the
+A table here split boundaries by the previous query's tool-call count and reported a
+monotone dose-response, read as support for the re-serialization hypothesis. It was
+computed with the metric's false-positive mode, which counted a request's uncached
+`input` as if the next request had to read it back — inflating precisely the
+tool-heavy boundaries it was being used to explain. Withdrawn; recompute from
+scratch rather than adjusting the old figures, which are in git history.
+
+The hypothesis itself is untouched and still worth testing: every bridge turn
+crosses a `--resume` boundary, CC appends its own records during the previous query
+(one per content block, one per tool result), and if that disk round-trip is not
+byte-faithful the prefix diverges exactly where the conversation starts — the
 `cacheRead == preamble` signature above.
-
-Splitting the sub-5-minute, same-model boundaries by what the previous query did
-(n=263, 59 cold):
-
-```
-previous query was TEXT-ONLY (no tool calls)   n=118   cold  11   9.3%
-previous query made tool calls                 n=145   cold  48  33.1%
-
-by tool-call count in the previous query:
-   0        n=118   cold 11    9.3%
-   1-2      n= 69   cold 13   18.8%
-   3-9      n= 57   cold 24   42.1%
-   10+      n= 19   cold 11   57.9%
-```
-
-Monotone dose-response: the more records CC wrote during the previous query, the
-likelier the next resume is cold. That supports the re-serialization hypothesis and
-turns the next step from a general hunt into "diff what CC sent live against what it
-reloads". The residual matters too — text-only predecessors are still cold 9.3% of
-the time against a 0.6% control — so record round-tripping is not the whole story.
 
 **Thinking blocks are untested, not exonerated.** The obvious log-side proxy does
 not exist: `reasoning=` appears in **0** of 14,994 `usage:` lines, so the SDK never
@@ -318,18 +304,9 @@ literal diff file is strictly more expensive — it additionally requires
 `changes.buildPrevDiffableContent`, set only when a previous snapshot exists — so
 grep the reason string first and only chase the diff if it is ambiguous.
 
-**The request-body capture is built and works** — `diag/capture-proxy.mjs` plus
-`diag/diff-captures.mjs`:
-
-```
-node diag/capture-proxy.mjs --out /tmp/cap &
-ANTHROPIC_BASE_URL=http://127.0.0.1:8787 pi --model claude-bridge/claude-haiku-4-5
-node diag/diff-captures.mjs /tmp/cap
-```
-
-Subscription OAuth forwards through a custom base URL, so no API key is needed —
-that caveat is settled. Treat the capture dir as sensitive: it holds whole
-conversations. (Authorization headers are forwarded but never written.)
+**The request-body capture is built and works** — see `diag/capture-proxy.mjs` for
+invocation and for how the capture dir must be handled. Subscription OAuth forwards
+through a custom base URL, so no API key is needed; that caveat is settled.
 
 ### The metric had a false-positive mode; fixed, and the corpus number survives
 
@@ -353,10 +330,31 @@ corpus finding is not an artifact — but it also has not been reproduced.**
 
 33 bridge-free boundaries (`claude -p … --resume`, CC's own session file and tools,
 one process per turn) at 45–85k prompts on Haiku: **0 cold** under the corrected
-metric. Reads land within 10 tokens of expectation every time. The audited failures
-are `claude-opus-5[1m]` at `xhigh` with 100–400k prompts and total collapse — a
-regime none of these runs approached — so leave `diag/capture-proxy.mjs` on during
-a real session of that shape rather than paying to synthesize one.
+metric. Reads land within 10 tokens of expectation every time.
+
+A second control, this time *through* the bridge: 15 `int-cache.sh` runs under the
+capture proxy, **0 of 90 boundaries cold**. Each run is 5 prompts over ~13k prompt
+tokens on Haiku with 2 tool calls, and every boundary reads back `cacheRead +
+cacheWrite` to within ~70 tokens. Runs 2–15 also open fully warm (12283 read / 0
+write) off run 1's prefix, so a resume attaching to an earlier *conversation's*
+cache entry is not sufficient to break it either.
+
+The audited failures are `claude-opus-5[1m]` at `xhigh` with 100–400k prompts and
+total collapse — a regime neither control approaches — so leave
+`diag/capture-proxy.mjs` on during a real session of that shape rather than paying
+to synthesize one.
+
+One cold boundary was observed outside the proxy and has not recurred: `int-cache.sh`
+as stage 4 of `npm test`, turn 7 reading 0 and writing 13042 at a reuse boundary.
+What distinguishes it from all 16 clean runs is turn 1's attach — 8309 read / 3976
+write, a *partial* attach to the prefix left by the smoke and multi-turn stages,
+against 12283 read / 0 write when the run is looped against itself. Looping
+`int-cache.sh` alone cannot recreate that state; the chain has to run.
+
+Note when reading a cold capture: `system[0]` carries CC's per-request billing
+header (`cch=<hash>`), which changes every request, so `diff-captures.mjs` reports a
+divergence at element 0 on **every** boundary, warm or cold. It is cacheable and
+benign. Look past it to the first divergence that matters.
 
 ### Confirmed instead: CC's resume reorders same-millisecond tool_results
 
