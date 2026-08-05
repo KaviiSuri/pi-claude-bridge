@@ -61,10 +61,15 @@ run "provider: print mode responds" \
   --model "claude-bridge/claude-sonnet-4-6" \
   -p "Reply with just the word 'yes'"
 
-run "provider: --provider flag works" \
-  pi --no-session -ne -e "$DIR" \
-  --provider claude-bridge \
-  -p "Reply with just the word 'yes'"
+# findInitialModel takes its CLI branch on `cliProvider && cliModel`, so --provider
+# on its own is a no-op: pi falls through to the global settings default and the
+# test passes or fails on whichever model that happens to be. Assert the model that
+# actually answered, not merely that something did.
+run "provider: --provider + --model resolve to the bridge" \
+  bash -c "pi --no-session -ne -e '$DIR' --provider claude-bridge --model claude-haiku-4-5 --mode json \
+    -p \"Reply with just the word 'yes'\" 2>/dev/null \
+    | jq -r 'select(.message.role==\"assistant\") | .message.provider + \"/\" + .message.model' \
+    | sort -u | grep -x 'claude-bridge/claude-haiku-4-5'"
 
 run "provider: model list includes provider" \
   bash -c "pi --no-session -ne -e '$DIR' --list-models 2>&1 | grep claude-bridge"
