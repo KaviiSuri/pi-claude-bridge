@@ -735,23 +735,22 @@ let piUI: ExtensionUIContext | null = null;
 let piMode: ExtensionContext["mode"] | null = null;
 const activeQueryContexts = new Set<QueryContext>();
 
-// `plan` is the one setting whose default silently costs the user something (no
-// Opus 1M on Max), so announce it once. Deferred to the first bridge query
-// rather than session_start: the notice persists a flag to the global config,
-// and firing it on startup would write that file for every pi session that
-// merely has this extension installed.
-let planNoticePending = false;
+// Defaults that silently cost the user something (no Opus 1M on Max, no
+// AskClaude tool) are announced once. Deferred to the first bridge query rather
+// than session_start: the notice persists a flag to the global config, and
+// firing it on startup would write that file for every pi session that merely
+// has this extension installed. One message, because consecutive info notifies
+// overwrite each other in the TUI.
+let pendingNotices: string[] = [];
 
-function showPlanNoticeOnce(): void {
+function showStartupNoticeOnce(): void {
 	// `hasUI` is true in RPC mode too — it means dialogs are possible, not that a
 	// human is watching. Only a terminal user can act on this.
-	if (!planNoticePending || piMode !== "tui") return;
-	planNoticePending = false;
+	if (pendingNotices.length === 0 || piMode !== "tui") return;
+	const notices = pendingNotices;
+	pendingNotices = [];
 	const path = markStartupNoticeShown();
-	piUI?.notify(
-		`Claude bridge: assuming a Pro plan. On Max (or Team Premium/Enterprise), set provider.plan to "max" in ${path} to unlock Opus at 1M context.`,
-		"info",
-	);
+	piUI?.notify(`Claude bridge — settings live in ${path}\n${notices.map((n) => `• ${n}`).join("\n")}`, "info");
 }
 
 // The user's own system prompt customisation (`--system-prompt`,
@@ -1310,7 +1309,7 @@ function drainForAbort(c: QueryContext, promptStream: PromptStream): void {
 /** Provider entry point. Pi calls this for each new prompt and each tool result.
  *  Two cases: tool result delivery (active query) or fresh query. */
 function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
-	showPlanNoticeOnce();
+	showStartupNoticeOnce();
 	const stream = newAssistantMessageEventStream();
 
 	// DEBUG: trace followUp message triggering
@@ -1797,7 +1796,10 @@ export default function (pi: ExtensionAPI) {
 	};
 	const registeredModels = applyLongContext(MODELS, longContextSettings);
 
-	planNoticePending = config.provider?.plan === undefined && !config.startupNoticeShown;
+	if (!config.startupNoticeShown) {
+		if (config.provider?.plan === undefined) pendingNotices.push('Assuming a Pro plan. On Max (or Team Premium/Enterprise), set provider.plan to "max" to unlock Opus at 1M context.');
+		if (config.askClaude?.enabled === undefined) pendingNotices.push("The AskClaude tool is opt-in and is not registered. Set askClaude.enabled to true to use it.");
+	}
 
 	// Reset shared session on pi session lifecycle events
 	const clearSession = (event: string) => {
@@ -1917,7 +1919,7 @@ export default function (pi: ExtensionAPI) {
 	let modeDesc = `"read" (default): questions about the codebase — review, analysis, explain. "none": general knowledge only (no file access).`;
 	if (allowFull) modeDesc += ` "full": allows writing and bash execution (careful: runs without feedback to pi).`;
 
-	if (askConf?.enabled !== false) {
+	if (askConf?.enabled) {
 		const askClaudeParams = Type.Object({
 			prompt: Type.String({ description: "The question or task for Claude Code. By default Claude sees the full conversation history. Don't research up front, let Claude explore." }),
 			mode: Type.Optional(StringEnum(modeValues, { description: modeDesc })),
