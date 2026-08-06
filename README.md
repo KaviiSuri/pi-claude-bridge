@@ -112,3 +112,9 @@ When filing a bug about a session-resume failure (e.g. "No conversation found"),
 ## Maintenance
 
 After a Claude Code release, review `MODE_DISALLOWED_TOOLS` in `src/index.ts` — it gates which CC tools the AskClaude subagent may invoke per mode (`read` / `full` / `none`). Add new agentic tools (PlanMode, Task spawning, etc.) to the appropriate mode lists if they shouldn't be available to subagents.
+
+## Known issues
+
+**`@file` mentions are lost when the session is rebuilt.** Claude Code expands an at-mention itself and stores the file's contents in its own session file; pi never sees them. Whenever the bridge rebuilds that session — after an abort, `/compact`, tree navigation, or an API error — the expansion isn't carried across, so Claude keeps the text of your prompt but loses the file it pointed at. Nothing surfaces this. The usual sign is Claude re-reading a file you already handed it, or answering as though it hadn't seen one. Re-mention the file, or ask for the path to be read. A real fix needs attachment-record support in `cc-session-io`; see `TODO.md`.
+
+Rebuilds are also the expensive path for the prompt cache: measured over this repo's own bridge log, a rebuild boundary loses the cache roughly 58% of the time against 26% for a plain resume, so an abort-heavy session costs noticeably more than a clean one.
