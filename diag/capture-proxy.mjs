@@ -12,7 +12,13 @@
 //   node diag/diff-captures.mjs DIR
 //
 // Requests are written verbatim (they contain the conversation, so treat DIR as
-// sensitive). Authorization headers are forwarded but never written to disk.
+// sensitive). Authorization headers are forwarded but only ever recorded as their
+// key family (`sk-ant-oat01`, `sk-ant-api03`), which names the billing path a
+// request took without writing credential material.
+//
+// A non-2xx also writes err-NNNN.json with the request headers, response headers
+// and response body — the rate-limit and billing headers there are the record of
+// what the server decided, and they are gone once the process exits.
 
 import { createServer } from "node:http";
 import { mkdirSync, writeFileSync, appendFileSync } from "node:fs";
@@ -32,6 +38,19 @@ mkdirSync(OUT, { recursive: true });
 const INDEX = join(OUT, "index.jsonl");
 
 let seq = 0;
+
+/** Header set minus credential material. `authorization` is reduced to its key
+ *  family so a capture still shows whether a request authenticated as a
+ *  subscription (oat) or an API key (api), which changes how it is billed. */
+function safeHeaders(headers) {
+	const out = {};
+	for (const [k, v] of Object.entries(headers)) {
+		if (k === "authorization") out[k] = `${String(v).split(" ")[0]} ${String(v).split(" ")[1]?.slice(0, 12) ?? ""}…`;
+		else if (k === "x-api-key") out[k] = `${String(v).slice(0, 12)}…`;
+		else out[k] = v;
+	}
+	return out;
+}
 
 /** cache_read/cache_creation off the SSE stream, so each captured request is
  *  paired with what the cache actually did for it. */
@@ -84,6 +103,20 @@ createServer((req, res) => {
 		try { parsed = JSON.parse(body.toString("utf8")); } catch {}
 		if (parsed) writeFileSync(join(OUT, `req-${String(n).padStart(4, "0")}.json`), JSON.stringify(parsed, null, 1));
 
+		const requestHeaders = safeHeaders(headers);
+		// /v1/ only: the SDK health-checks `/` with HEAD and takes the 404 in stride.
+		if (upstream.status >= 300 && req.url.startsWith("/v1/")) {
+			writeFileSync(join(OUT, `err-${String(n).padStart(4, "0")}.json`), JSON.stringify({
+				n,
+				at: new Date().toISOString(),
+				status: upstream.status,
+				path: req.url,
+				requestHeaders,
+				responseHeaders,
+				responseBody: text,
+			}, null, 1));
+		}
+
 		appendFileSync(INDEX, JSON.stringify({
 			n,
 			at: new Date().toISOString(),
@@ -93,8 +126,11 @@ createServer((req, res) => {
 			messages: parsed?.messages?.length ?? null,
 			tools: parsed?.tools?.length ?? null,
 			usage: usageFromSse(text),
+			betas: requestHeaders["anthropic-beta"] ?? null,
+			auth: requestHeaders.authorization ?? requestHeaders["x-api-key"] ?? null,
 		}) + "\n");
-		console.error(`[${n}] ${req.method} ${req.url} → ${upstream.status} msgs=${parsed?.messages?.length ?? "-"}`);
+		const tag = upstream.status >= 300 ? ` ERROR → err-${String(n).padStart(4, "0")}.json` : "";
+		console.error(`[${n}] ${req.method} ${req.url} → ${upstream.status} msgs=${parsed?.messages?.length ?? "-"}${tag}`);
 	});
 }).listen(PORT, "127.0.0.1", () => {
 	console.error(`capture proxy on http://127.0.0.1:${PORT} → ${UPSTREAM}`);
