@@ -427,3 +427,52 @@ describe("conversion survives repairToolPairing", () => {
 		assert.deepEqual(stubs, []);
 	});
 });
+
+describe("aborted assistant turns", () => {
+	it("a turn aborted before anything streamed is dropped, not fabricated", () => {
+		const result = convert([
+			{ role: "user", content: [{ type: "text", text: "first ask" }] },
+			{ role: "assistant", content: [] },
+			{ role: "user", content: [{ type: "text", text: "second ask" }] },
+		]);
+		assert.equal(result.length, 2);
+		assert.deepEqual(result.map((m) => m.role), ["user", "user"]);
+	});
+
+	it("a turn whose blocks were all filtered still says so", () => {
+		const result = convert([
+			{ role: "assistant", provider: "deepseek", content: [{ type: "thinking", thinking: "deep thoughts" }] },
+		]);
+		assert.equal(result.length, 1);
+		assert.equal(result[0].content[0].text, "[incompatible content omitted]");
+	});
+
+	// The prompt cache is keyed on exact prefix bytes, so a rebuild must reproduce
+	// the sequence Claude Code already cached. An aborted turn contributes nothing
+	// live, so standing a placeholder in for it on rebuild diverged at that index
+	// and cost every downstream cached token. See eli/todos.md.
+	it("rebuilding across an aborted turn preserves the cached prefix", () => {
+		const live = convert([
+			{ role: "user", content: [{ type: "text", text: "first ask" }] },
+			{ role: "user", content: [{ type: "text", text: "second ask" }] },
+			{ role: "assistant", content: [{ type: "text", text: "answer" }] },
+		]);
+		const rebuilt = convert([
+			{ role: "user", content: [{ type: "text", text: "first ask" }] },
+			{ role: "assistant", content: [] },
+			{ role: "user", content: [{ type: "text", text: "second ask" }] },
+			{ role: "assistant", content: [{ type: "text", text: "answer" }] },
+		]);
+		assert.deepEqual(rebuilt, live);
+	});
+
+	it("a result stranded after an aborted turn still lands on the real assistant", () => {
+		const result = convert([
+			{ role: "assistant", content: [{ type: "toolCall", id: "t1", name: "bash", arguments: {} }] },
+			{ role: "assistant", content: [] },
+			{ role: "toolResult", toolCallId: "t1", content: "ok" },
+		]);
+		assert.deepEqual(result.map((m) => m.role), ["assistant", "user"]);
+		assert.equal(result[1].content[0].tool_use_id, "t1");
+	});
+});

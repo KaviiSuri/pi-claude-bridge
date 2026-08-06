@@ -226,9 +226,10 @@ let sharedSession: SessionState | null = null;
 // Convert pi messages to Anthropic API format for session import.
 // Lossy: only text, thinking and toolCall blocks survive, and thinking only when
 // Claude Code itself minted the signature. An assistant message whose blocks all
-// filter out keeps its slot with a placeholder rather than being dropped, since
-// dropping it can create invalid sequences (two user messages in a row, or a
-// tool_result with no preceding tool_use).
+// filter out keeps its slot with a placeholder, since dropping it can create a
+// tool_result with no preceding tool_use. A turn aborted before anything streamed
+// is dropped instead — it never had content, and inventing one diverges from the
+// prefix Claude Code cached.
 function convertAndImportMessages(
 	session: ReturnType<typeof createSession>,
 	messages: Context["messages"],

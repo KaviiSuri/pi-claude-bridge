@@ -120,8 +120,6 @@ export function convertPiMessages(
 				anthropicMessages.push({ role: "user", content: "[empty]" });
 			}
 		} else if (msg.role === "assistant") {
-			turnResults = null;
-			turnAssistantIdx = anthropicMessages.length;
 			const content = Array.isArray(msg.content) ? msg.content : [];
 			const blocks = [];
 			for (const block of content) {
@@ -140,11 +138,21 @@ export function convertPiMessages(
 					blocks.push({ type: "tool_use", id: sanitizeToolId(block.id, sanitizedIds), name: toolName, input: block.arguments ?? {} });
 				}
 			}
-			// Keep the assistant slot occupied: the API rejects empty content, and
-			// dropping the message breaks turn alternation and tool pairing. Note this
-			// also fires for a turn the user aborted before anything streamed, where
-			// nothing was filtered and there was never any content to omit.
+			// A turn the user aborted before anything streamed carries no content at
+			// all. Standing a placeholder in its place invents a reply the assistant
+			// never made, and because it lands early in the prefix it costs the whole
+			// downstream prompt cache every time the session is rebuilt. Drop it:
+			// Session.importMessages imposes no alternation, and a turn with no blocks
+			// has no tool_use ids needing a synthetic result. Left before the turn
+			// bookkeeping so a stray result still attaches to the last assistant
+			// message actually emitted.
+			if (!content.length) continue;
+			// Blocks were present but every one was filtered — content really was
+			// dropped here, so keep the slot and say so. Empty content is rejected by
+			// the API, and dropping the message would break tool pairing.
 			if (!blocks.length) blocks.push({ type: "text", text: "[incompatible content omitted]" });
+			turnResults = null;
+			turnAssistantIdx = anthropicMessages.length;
 			anthropicMessages.push({ role: "assistant", content: blocks });
 		} else if (msg.role === "toolResult") {
 			// Pi records one message per tool result, and repairToolPairing only
