@@ -140,6 +140,10 @@ export function convertPiMessages(
 					blocks.push({ type: "tool_use", id: sanitizeToolId(block.id, sanitizedIds), name: toolName, input: block.arguments ?? {} });
 				}
 			}
+			// Keep the assistant slot occupied: the API rejects empty content, and
+			// dropping the message breaks turn alternation and tool pairing. Note this
+			// also fires for a turn the user aborted before anything streamed, where
+			// nothing was filtered and there was never any content to omit.
 			if (!blocks.length) blocks.push({ type: "text", text: "[incompatible content omitted]" });
 			anthropicMessages.push({ role: "assistant", content: blocks });
 		} else if (msg.role === "toolResult") {

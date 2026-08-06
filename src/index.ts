@@ -224,10 +224,11 @@ interface SessionState {
 let sharedSession: SessionState | null = null;
 
 // Convert pi messages to Anthropic API format for session import.
-// Lossy: non-Anthropic thinking blocks are dropped (no valid signature), and only
-// text/image/toolCall block types are handled. If all blocks in an assistant message
-// are filtered, the message is dropped — which can create invalid sequences (e.g.
-// two user messages in a row, or tool_result without preceding tool_use).
+// Lossy: only text, thinking and toolCall blocks survive, and thinking only when
+// Claude Code itself minted the signature. An assistant message whose blocks all
+// filter out keeps its slot with a placeholder rather than being dropped, since
+// dropping it can create invalid sequences (two user messages in a row, or a
+// tool_result with no preceding tool_use).
 function convertAndImportMessages(
 	session: ReturnType<typeof createSession>,
 	messages: Context["messages"],
@@ -766,16 +767,48 @@ function showStartupNoticeOnce(): void {
 	piUI?.notify(`Claude bridge — settings live in ${path}\n${notices.map((n) => `• ${n}`).join("\n")}`, "info");
 }
 
-// The user's own system prompt customisation (`--system-prompt`,
-// `--append-system-prompt`), captured from before_agent_start. pi's assembled
-// `context.systemPrompt` can't be forwarded wholesale — it describes pi's tools
-// and harness and would fight Claude Code's own preset — but the user's text is
-// theirs and has to reach the model, so it is kept separately.
-let userSystemPrompt: { custom?: string; append?: string } = {};
+// What pi assembled for one agent: the user's own customisation
+// (`--system-prompt`, `--append-system-prompt`) and pi's context-file list,
+// captured from before_agent_start rather than rediscovered so the bridge cannot
+// disagree with pi about what applies. pi's `context.systemPrompt` can't be
+// forwarded wholesale — it describes pi's tools and harness and would fight
+// Claude Code's own preset — but the user's text is theirs and has to reach the
+// model, so it is carried separately and appended after the preset.
+type PromptCapture = { custom?: string; append?: string; contextFiles: { path: string; content: string }[] };
 
-// Pi's own context-file list for this run, captured rather than rediscovered so
-// the bridge cannot disagree with Pi about which files apply.
-let piContextFiles: { path: string; content: string }[] = [];
+// Keyed by the assembled prompt, not held in a single slot. pi fires
+// before_agent_start once per agent loop and sub-agents run in their own
+// AgentSession, so a single slot is last-writer-wins: a sub-agent overwrote the
+// parent's capture and nothing restored it, leaving every later parent turn with
+// the sub-agent's <sub_agent_context> and none of its own context files, for the
+// rest of the session. Keying makes a mismatch impossible rather than unlikely —
+// agent-session assigns `agent.state.systemPrompt` the same string the event
+// carries, so a query resolves to its own agent's capture or to none at all.
+const promptCaptures = new Map<string, PromptCapture>();
+const EMPTY_PROMPT_CAPTURE: PromptCapture = { contextFiles: [] };
+// pi rebuilds the prompt whenever the tool set changes, so keys accumulate
+// within a session; keep only the most recent few.
+const PROMPT_CAPTURE_LIMIT = 16;
+
+function capturePrompt(systemPrompt: string, capture: PromptCapture): void {
+	promptCaptures.delete(systemPrompt);
+	promptCaptures.set(systemPrompt, capture);
+	for (const key of promptCaptures.keys()) {
+		if (promptCaptures.size <= PROMPT_CAPTURE_LIMIT) break;
+		promptCaptures.delete(key);
+	}
+}
+
+function resolvePromptCapture(systemPrompt?: string): PromptCapture {
+	if (!systemPrompt) return EMPTY_PROMPT_CAPTURE;
+	const capture = promptCaptures.get(systemPrompt);
+	// A miss means this query's prompt never came through before_agent_start.
+	// Appending nothing is correct — appending another agent's text is what the
+	// keying exists to prevent — but it is worth seeing, because it also means
+	// the user's own instructions did not reach Claude for this turn.
+	if (!capture) debug(`provider: no prompt capture for this system prompt (${systemPrompt.length} chars)`);
+	return capture ?? EMPTY_PROMPT_CAPTURE;
+}
 
 function contextForToolResults(results: McpResult[]): QueryContext | undefined {
 	for (const result of results) {
@@ -1444,10 +1477,13 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	const mcpServers = buildMcpServers(mcpTools, queryCtx);
 	// Both come from what Pi loaded for this run, so `--no-context-files` and
 	// `--no-skills` reach Claude Code by leaving nothing to forward.
-	const agentsAppend = formatProjectContext(piContextFiles);
+	// Resolved per query from this turn's own prompt, so a concurrent sub-agent
+	// cannot contribute its context files or its <sub_agent_context> to a parent turn.
+	const promptCapture = resolvePromptCapture(context.systemPrompt);
+	const agentsAppend = formatProjectContext(promptCapture.contextFiles);
 	const skillsAppend = extractSkillsBlock(context.systemPrompt);
 	// Last, so the user's own instructions win over anything the bridge adds.
-	const appendParts = [agentsAppend, skillsAppend, userSystemPrompt.custom, userSystemPrompt.append]
+	const appendParts = [agentsAppend, skillsAppend, promptCapture.custom, promptCapture.append]
 		.filter((part): part is string => Boolean(part));
 	const systemPromptAppend = appendParts.length > 0 ? appendParts.join("\n\n") : undefined;
 
@@ -1506,7 +1542,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	debug("provider: fresh query",
 		`model=${cliModel} msgs=${context.messages.length} tools=${mcpTools.length}`,
 		`resume=${resumeSessionId?.slice(0, 8) ?? "none"} effort=${effort ?? "default"}`,
-		`ctxFiles=${piContextFiles.length} strictMcp=${strictMcpConfigEnabled}`,
+		`ctxFiles=${promptCapture.contextFiles.length} strictMcp=${strictMcpConfigEnabled}`,
 		`prompt=${promptText.slice(0, 60)}${promptBlocks ? " [+images]" : ""}`);
 
 	// 3. Start SDK query and claim it for this context
@@ -1839,8 +1875,11 @@ export default function (pi: ExtensionAPI) {
 	// still depends on, so both flags are forwarded as an append.
 	pi.on("before_agent_start", (event) => {
 		const options = event.systemPromptOptions;
-		userSystemPrompt = { custom: options?.customPrompt, append: options?.appendSystemPrompt };
-		piContextFiles = options?.contextFiles ?? [];
+		capturePrompt(event.systemPrompt, {
+			custom: options?.customPrompt,
+			append: options?.appendSystemPrompt,
+			contextFiles: options?.contextFiles ?? [],
+		});
 	});
 	pi.on("session_shutdown", () => clearSession("session_shutdown"));
 
