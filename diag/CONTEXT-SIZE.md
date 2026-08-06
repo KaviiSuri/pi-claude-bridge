@@ -81,6 +81,11 @@ result:success` — `subtype: "success"` despite `is_error: true`. Error text in
   "result": "Usage credits are required for long context requests.", "modelUsage": {}, "total_cost_usd": 0 }
 ```
 
+A third message shares this shape — `"You're out of extra usage. Add more at
+claude.ai/settings/usage and keep going."` (400) — but is *not* a long-context
+entitlement failure: it fires intermittently on models otherwise served 1M, and
+Max serves 1M with credits off. See [EXTRA-USAGE-400.md](./EXTRA-USAGE-400.md).
+
 ### Capability rejection (400) — e.g. `haiku-4-5[1m]` (not 1M-capable)
 
 Same shape, `api_error_status: 400`, no `rate_limit_event`. Text varies:

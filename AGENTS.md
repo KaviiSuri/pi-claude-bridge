@@ -34,6 +34,12 @@ cache-break scanner counted a request's uncached `input` as if the next request
 should read it back, which turned every tool-heavy turn into a false break and
 manufactured a dose-response that looked like a real finding.
 
+Bin by era before comparing groups. A correlation computed over a window that
+straddles the onset of the phenomenon will credit whatever else changed. Three
+independent analyses agreed one account state was safe on 5,611 clean requests —
+every one of which predated the first failure; switching to that state reproduced
+the failure in five minutes.
+
 Five wrong conclusions across two sessions came from skipping the above.
 
 ## Changelog
