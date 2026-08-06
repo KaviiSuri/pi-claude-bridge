@@ -235,7 +235,7 @@ function convertAndImportMessages(
 	messages: Context["messages"],
 	customToolNameToSdk?: Map<string, string>,
 ): void {
-	const { anthropicMessages, sanitizedIds } = convertPiMessages(messages, customToolNameToSdk);
+	const { anthropicMessages, sanitizedIds, dropped } = convertPiMessages(messages, customToolNameToSdk);
 
 	debug(`convertAndImportMessages: ${messages.length} pi msgs → ${anthropicMessages.length} anthropic msgs`);
 	debug(`convertAndImportMessages: imported roles:`, anthropicMessages.map((m, i) => {
@@ -244,6 +244,16 @@ function convertAndImportMessages(
 		if (Array.isArray(c)) return `[${i}]${m.role}:${(c).map((b) => b.type).join("+")}`;
 		return `[${i}]${m.role}:?`;
 	}).join(" "));
+	// The roles line above shows only what survived, so a stripped block is
+	// indistinguishable there from one that never existed. Name the losses.
+	const droppedParts = [
+		dropped.thinking ? `${dropped.thinking} thinking (${[...dropped.providers].sort().join(", ")})` : "",
+		dropped.abortedTurns ? `${dropped.abortedTurns} aborted turn(s)` : "",
+		...[...dropped.other].map(([type, n]) => `${n} ${type}`),
+	].filter(Boolean);
+	if (droppedParts.length > 0) {
+		debug(`convertAndImportMessages: dropped ${droppedParts.join(", ")}`);
+	}
 	if (sanitizedIds.size > 0) {
 		debug(`convertAndImportMessages: sanitized ${sanitizedIds.size} tool IDs:`,
 			[...sanitizedIds.entries()].map(([orig, clean]) => orig === clean ? orig : `${orig}→${clean}`).join(", "));

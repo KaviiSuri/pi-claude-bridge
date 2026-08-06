@@ -90,13 +90,25 @@ function toolResultContent(
 	return blocks;
 }
 
+/** What convertPiMessages discarded, for the debug line in index.ts. */
+export type DroppedContent = {
+	thinking: number;
+	abortedTurns: number;
+	providers: Set<string>;
+	other: Map<string, number>;
+};
+
 /** Convert pi message array to Anthropic API format. */
 export function convertPiMessages(
 	messages: PiMessage[],
 	customToolNameToSdk?: Map<string, string>,
-): { anthropicMessages: SessionMessage[]; sanitizedIds: Map<string, string> } {
+): { anthropicMessages: SessionMessage[]; sanitizedIds: Map<string, string>; dropped: DroppedContent } {
 	const anthropicMessages = [];
 	const sanitizedIds = new Map();
+	// What conversion discarded. Nothing downstream can tell: a stripped thinking
+	// block and a message that never carried one convert to the same thing, so
+	// without this the loss is invisible in the log and in a captured request.
+	const dropped: DroppedContent = { thinking: 0, abortedTurns: 0, providers: new Set(), other: new Map() };
 	// The user message collecting this assistant turn's tool results, if one has
 	// been emitted yet, and the index of the assistant message it belongs to. Both
 	// are cleared at every assistant message — see the toolResult branch.
@@ -132,10 +144,15 @@ export function convertPiMessages(
 					const sig = block.thinkingSignature;
 					if (msg.provider === PROVIDER_ID && sig) {
 						blocks.push({ type: "thinking", thinking: block.thinking ?? "", signature: sig });
+					} else {
+						dropped.thinking++;
+						dropped.providers.add(msg.provider ?? "unknown");
 					}
 				} else if (block.type === "toolCall") {
 					const toolName = mapPiToolNameToSdk(block.name, customToolNameToSdk);
 					blocks.push({ type: "tool_use", id: sanitizeToolId(block.id, sanitizedIds), name: toolName, input: block.arguments ?? {} });
+				} else {
+					dropped.other.set(block.type, (dropped.other.get(block.type) ?? 0) + 1);
 				}
 			}
 			// A turn the user aborted before anything streamed carries no content at
@@ -146,7 +163,7 @@ export function convertPiMessages(
 			// has no tool_use ids needing a synthetic result. Left before the turn
 			// bookkeeping so a stray result still attaches to the last assistant
 			// message actually emitted.
-			if (!content.length) continue;
+			if (!content.length) { dropped.abortedTurns++; continue; }
 			// Blocks were present but every one was filtered — content really was
 			// dropped here, so keep the slot and say so. Empty content is rejected by
 			// the API, and dropping the message would break tool pairing.
@@ -194,5 +211,5 @@ export function convertPiMessages(
 		}
 	}
 
-	return { anthropicMessages, sanitizedIds };
+	return { anthropicMessages, sanitizedIds, dropped };
 }
