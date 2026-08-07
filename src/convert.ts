@@ -163,6 +163,13 @@ export function convertPiMessages(
 			// has no tool_use ids needing a synthetic result. Left before the turn
 			// bookkeeping so a stray result still attaches to the last assistant
 			// message actually emitted.
+			//
+			// Do NOT clear turnResults/turnAssistantIdx here. It looks like the tidy
+			// thing to do, but an abort between two parallel results — assistant[X,Y],
+			// R_X, aborted turn, R_Y — would then start a second results message for
+			// R_Y. repairToolPairing consumes both pending ids at the first one, stubs
+			// Y there and drops the real R_Y as unmatched, destroying the parallel
+			// result this merge exists to preserve. unit-import.mjs pins the shape.
 			if (!content.length) { dropped.abortedTurns++; continue; }
 			// Blocks were present but every one was filtered — content really was
 			// dropped here, so keep the slot and say so. Empty content is rejected by
