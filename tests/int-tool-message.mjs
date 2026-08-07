@@ -117,7 +117,7 @@ describe("tool-message integration", () => {
 		await waitForEvent("tool_execution_start");
 		await send({
 			type: "prompt",
-			message: "This is a steer during parallel tool execution.",
+			message: "This is a steer during parallel tool execution. IMPORTANT: also say the exact word 'PAPAYA' on its own line in your response.",
 			streamingBehavior: "steer",
 		});
 		await waitForEvent("agent_end");
@@ -125,6 +125,11 @@ describe("tool-message integration", () => {
 		// All three tools should have their results in the response
 		const matches = (text.match(/slowtool completed/gi) || []).length;
 		assert.ok(matches >= 3, `Expected 3 SlowTool results, found ${matches}: ${text.slice(0, 300)}`);
+		// Delivery only forwards a steer when the trailing message is a user message.
+		// Pi injects drained steers between tool results too (see extract-tool-results),
+		// and in that shape the steer would be dropped and the cursor advanced past it,
+		// so Claude never sees it. Asserting results survive does not catch that.
+		assert.match(text.toLowerCase(), /papaya/, `Steer during parallel tools not visible to assistant: ${text.slice(0, 300)}`);
 	});
 
 	it("steer during text response (no tool call) completes both turns", { timeout: TEST_TIMEOUT }, async () => {

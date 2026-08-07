@@ -1,7 +1,7 @@
 import { calculateCost, StringEnum, type AssistantMessage, type AssistantMessageEventStream, type Context, type ImageContent, type Model, type SimpleStreamOptions, type TextContent, type Tool, type UserMessage } from "@earendil-works/pi-ai";
 import * as piAi from "@earendil-works/pi-ai";
 import { getModels } from "@earendil-works/pi-ai/compat";
-import { buildSessionContext, compact, keyHint, type CompactionEntry, type ExtensionAPI, type ExtensionContext, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import { buildSessionContext, compact, generateBranchSummary, keyHint, type BranchSummaryResult, type CompactionEntry, type ExtensionAPI, type ExtensionContext, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { query, type EffortLevel, type SDKMessage, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
 import type { Base64ImageSource, ContentBlockParam } from "@anthropic-ai/sdk/resources";
 import { Type } from "typebox";
@@ -741,6 +741,7 @@ export const __test = {
 	drainForAbort,
 	CC_CHILD_ENV,
 	buildMcpServers,
+	branchSummaryOutcome,
 };
 
 // --- Provider helpers: tool name mapping ---
@@ -824,6 +825,44 @@ function showStartupNoticeOnce(): void {
 // Captures of what pi assembled per agent; see src/prompt-capture.ts for why this
 // is keyed rather than held in a single slot.
 const promptCaptures = new PromptCaptures();
+
+/** Whatever a settled session left behind, named in one greppable line.
+ *
+ *  Every one of these should be empty once the last turn ends, and each is a leak
+ *  that costs something real: a retained context routes a later orphaned tool result
+ *  into the delivery path and returns a stream nobody ends; a pending tool call is an
+ *  MCP handler Claude Code is still waiting on; a live prompt stream is an unresolved
+ *  ack. The activeQueryContexts leak was present on every single happy-path run and
+ *  no test noticed, because nothing asserted that anything ends clean — so assert it
+ *  where the real sessions are, and let diag/audit-warnings.mjs scan for it. */
+function reportLeaks(label: string): void {
+	const pendingCalls = [...activeQueryContexts].reduce((n, c) => n + c.pendingToolCalls.size, 0);
+	const liveStreams = [...activeQueryContexts].filter((c) => c.promptStream !== null).length;
+	if (activeQueryContexts.size === 0 && pendingCalls === 0 && liveStreams === 0) return;
+	debug(
+		`WARNING: ${label} left state behind — contexts=${activeQueryContexts.size} `
+		+ `pendingToolCalls=${pendingCalls} promptStreams=${liveStreams}`,
+	);
+}
+
+/** What pi's branch summary means for the navigation it was asked for.
+ *
+ *  Cancelling on failure matches pi's own path, which rethrows a summary error out
+ *  of the navigation rather than moving without one. Separated from the event
+ *  handler so this decision is testable without a Claude Code subprocess — driving
+ *  `generateBranchSummary` itself would only be testing pi. */
+function branchSummaryOutcome(result: BranchSummaryResult): { cancel: true } | { summary: { summary: string; details: unknown; usage?: BranchSummaryResult["usage"] } } {
+	if (result.aborted) return { cancel: true };
+	if (result.error) throw new Error(result.error);
+	debug(`session_before_tree: takeover complete summaryLen=${result.summary?.length ?? 0}`);
+	return {
+		summary: {
+			summary: result.summary ?? "",
+			details: { readFiles: result.readFiles ?? [], modifiedFiles: result.modifiedFiles ?? [] },
+			usage: result.usage,
+		},
+	};
+}
 
 function contextForToolResults(results: McpResult[]): QueryContext | undefined {
 	for (const result of results) {
@@ -1442,6 +1481,21 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	const queryCtx = isReentrant ? new QueryContext() : ctx();
 	debug(`provider: fresh query setup, isReentrant=${isReentrant}, activeContexts=${activeQueryContexts.size}`);
 
+	// Resolved first: an unaccountable system prompt throws, and doing that before
+	// anything is claimed or reset leaves no half-built query behind — in particular
+	// no stream claimed on the shared context that nobody will ever end.
+	const { mcpTools, customToolNameToSdk, customToolNameToPi } = resolveMcpTools(context, askClaudeToolName);
+	// Build from what Pi loaded for this run, so `--no-context-files` and
+	// `--no-skills` reach Claude Code by leaving nothing to forward. A sub-agent's
+	// custom override embeds its parent's assembled Pi prompt; recursive projection
+	// replaces that exact inherited prompt with its already-safe portable parts.
+	const promptCapture = promptCaptures.resolveOrDerive(context.systemPrompt);
+	const systemPromptAppend = promptCapture
+		? projectPromptCapture(promptCapture, {
+			skillReadTool: mcpTools.some((tool) => tool.name === "read") ? "mcp" : "none",
+		})
+		: undefined;
+
 	// 2. Fresh child context — constructor already gave us clean Maps and empty
 	//    arrays. For a reused top-level context, clear explicitly.
 	claimCurrentPiStream(stream, "fresh-query", queryCtx);
@@ -1454,19 +1508,6 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	queryCtx.resetTurnState(model);
 	queryCtx.latestCursor = 0;
 
-	const { mcpTools, customToolNameToSdk, customToolNameToPi } = resolveMcpTools(context, askClaudeToolName);
-	// Resolved before anything mutates session state, so an unaccountable prompt
-	// fails the turn cleanly rather than midway through building the query.
-	// Build from what Pi loaded for this run, so `--no-context-files` and
-	// `--no-skills` reach Claude Code by leaving nothing to forward. A sub-agent's
-	// custom override embeds its parent's assembled Pi prompt; recursive projection
-	// replaces that exact inherited prompt with its already-safe portable parts.
-	const promptCapture = promptCaptures.resolveOrDerive(context.systemPrompt);
-	const systemPromptAppend = promptCapture
-		? projectPromptCapture(promptCapture, {
-			skillReadTool: mcpTools.some((tool) => tool.name === "read") ? "mcp" : "none",
-		})
-		: undefined;
 	const cwd = (options as { cwd?: string } | undefined)?.cwd ?? process.cwd();
 	// cliModel is the actual id sent to Claude Code (may carry [1m]); model.id is the
 	// pi-registered id. Log cliModel so debug lines reflect what CC actually received.
@@ -1558,7 +1599,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	debug("provider: fresh query",
 		`model=${cliModel} msgs=${context.messages.length} tools=${mcpTools.length}`,
 		`resume=${resumeSessionId?.slice(0, 8) ?? "none"} effort=${effort ?? "default"}`,
-		`ctxFiles=${promptCapture.contextFiles.length} strictMcp=${strictMcpConfigEnabled}`,
+		`ctxFiles=${promptCapture?.contextFiles.length ?? 0} strictMcp=${strictMcpConfigEnabled}`,
 		`prompt=${promptText.slice(0, 60)}${promptBlocks ? " [+images]" : ""}`);
 
 	// 3. Start SDK query and claim it for this context
@@ -1659,12 +1700,15 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 			// hasn't already claimed the shared context.
 			promptStream.fail(new Error("query ended"));
 			if (queryCtx.promptStream === promptStream) queryCtx.promptStream = null;
-			if (queryCtx.activeQuery === sdkQuery) {
+			// A later query claiming this context sets activeQuery to its own handle;
+			// null means the .then/.catch above cleared ours and nothing replaced it.
+			// Testing only for `=== sdkQuery` would never fire on the non-reentrant
+			// path, leaving the top-level context in the routing set forever — where a
+			// later orphaned tool result matches its stale turnToolCallIds and takes
+			// the delivery branch, returning a stream nothing ends.
+			if (queryCtx.activeQuery === sdkQuery || queryCtx.activeQuery === null) {
 				queryCtx.releasePendingToolCalls("Query ended");
 				queryCtx.activeQuery = null;
-				// Guarded like the two cleanups above: if a later query has already
-				// claimed this context, removing it from the routing set would send
-				// that query's tool results down the orphan path and strand its handler.
 				activeQueryContexts.delete(queryCtx);
 			}
 			sdkQuery.close();
@@ -1720,12 +1764,16 @@ async function promptAndWait(
 	// AskClaude uses Claude Code's native Read tool rather than Pi's MCP bridge.
 	// Same resolver as the provider path: a prompt neither recorded nor derivable
 	// throws here too, rather than silently sending Claude Code no skills.
-	const skillCapture = promptCaptures.resolveOrDerive(options?.systemPrompt);
-	const skillsBlock = options?.appendSkills !== false && skillCapture
-		? renderSkillsBlock(
-			collectPromptSkills(skillCapture),
-			disallowedTools.includes("Read") ? "none" : "native",
-		)
+	//
+	// Resolved only when the answer would be used. The throw is justified by what a
+	// miss would cost, so where it costs nothing — skills switched off, or no reader
+	// to open a skill file with — an unrelated miss must not fail the call.
+	const skillReadTool = disallowedTools.includes("Read") ? "none" : "native";
+	const skillCapture = options?.appendSkills !== false && skillReadTool !== "none"
+		? promptCaptures.resolveOrDerive(options?.systemPrompt)
+		: undefined;
+	const skillsBlock = skillCapture
+		? renderSkillsBlock(collectPromptSkills(skillCapture), skillReadTool)
 		: undefined;
 
 	// Effort
@@ -1823,6 +1871,12 @@ async function promptAndWait(
 					if (r.usage) {
 						debug(`askClaude: result usage: in=${r.usage.input_tokens} out=${r.usage.output_tokens} cacheRead=${r.usage.cache_read_input_tokens ?? 0} cacheWrite=${r.usage.cache_creation_input_tokens ?? 0} turns=${r.num_turns ?? "?"}`);
 					}
+					// Claude Code reports an API failure with `is_error` on a result whose
+					// subtype is still "success", so without this the error text was returned
+					// as Claude's answer and pi's model read a 429 as content. Throwing hands
+					// it to the tool's own catch, which renders it as an error result.
+					const failure = wasAborted ? undefined : resultErrorText(message);
+					if (failure) throw new Error(failure);
 					if (!responseText && message.subtype === "success" && message.result) {
 						responseText = message.result;
 					}
@@ -1906,7 +1960,10 @@ export default function (pi: ExtensionAPI) {
 			skills: hasRead ? options?.skills ?? [] : [],
 		});
 	});
-	pi.on("session_shutdown", () => clearSession("session_shutdown"));
+	pi.on("session_shutdown", () => {
+		reportLeaks("session_shutdown");
+		clearSession("session_shutdown");
+	});
 
 	pi.on("session_before_compact", async (event, ctx) => {
 		if (ctx.model?.baseUrl !== "claude-bridge") return undefined;
@@ -1956,6 +2013,38 @@ export default function (pi: ExtensionAPI) {
 	};
 	pi.on("session_compact", (event) => markRebuild(`session_compact:${event.reason}:willRetry=${event.willRetry}`));
 	pi.on("session_tree", () => markRebuild("session_tree"));
+
+	// Branch summarization — rewind or fork-at-point with "summarize" — is the other
+	// place pi asks the model for a summary, and unlike compaction it runs through
+	// the *agent's* stream function (agent-session passes `streamFn:
+	// this.agent.streamFunction`). On a bridge model that reaches this provider
+	// carrying pi's internal summarization prompt, which no `before_agent_start`
+	// ever recorded, so the prompt-capture resolver has nothing to resolve it to.
+	// Take it over the way compaction is taken over: the summary runs as its own
+	// Claude Code subprocess, never touching the live session or the resolver.
+	pi.on("session_before_tree", async (event, ctx) => {
+		if (ctx.model?.baseUrl !== "claude-bridge") return undefined;
+		const { entriesToSummarize, userWantsSummary, customInstructions, replaceInstructions } = event.preparation;
+		if (!userWantsSummary || entriesToSummarize.length === 0) return undefined;
+		debug(`session_before_tree: takeover entries=${entriesToSummarize.length} target=${event.preparation.targetId.slice(0, 8)}`);
+		try {
+			const result = await generateBranchSummary(entriesToSummarize, {
+				model: ctx.model,
+				signal: event.signal,
+				customInstructions,
+				replaceInstructions,
+				streamFn: isolatedStreamFn,
+			});
+			return branchSummaryOutcome(result);
+		} catch (err) {
+			debug("session_before_tree: takeover failed; cancelling navigation", err);
+			ctx.ui?.notify?.(
+				`Claude bridge branch summary failed (${errorMessage(err)}); navigation cancelled.`,
+				"error",
+			);
+			return { cancel: true };
+		}
+	});
 
 	// --- Provider ---
 	//

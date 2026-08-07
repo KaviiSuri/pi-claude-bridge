@@ -61,9 +61,45 @@ describe("PromptCaptures", () => {
 
 		assert.match(projected, /parent rules/, "the wrapped prompt's own instructions must survive");
 		assert.match(projected, /browser/, "and so must its skills");
-		assert.doesNotMatch(projected, /PREFIX FROM ANOTHER EXTENSION|SUFFIX/, "but not the surrounding text");
-		assert.doesNotMatch(projected, /Pi documentation/, "and never Pi's harness");
+		// The wrapper's own text is instruction too. Substituting the embedded prompt
+		// while discarding what surrounds it would be the silent loss the throw exists
+		// to prevent — accept the prompt whole or refuse it, never accept and discard.
+		assert.match(projected, /PREFIX FROM ANOTHER EXTENSION/, "the wrapper's prefix must survive");
+		assert.match(projected, /SUFFIX/, "and so must its suffix");
+		assert.doesNotMatch(projected, /Pi documentation/, "but never Pi's harness, which the projection replaces");
 		assert.equal(captures.resolve(wrapped), undefined, "a derived capture is not retained");
+	});
+
+	it("revives an exact capture whose lookup key was evicted", () => {
+		const captures = new PromptCaptures(2);
+		captures.record(PARENT_KEY, capture({ contextFiles: [{ path: "/AGENTS.md", content: "parent rules" }] }));
+		// A child keeps the parent node alive by reference even once its key is gone.
+		captures.record(CHILD_KEY, capture({ custom: `${PARENT_KEY}${CHILD_SUFFIX}` }));
+		// Evicts PARENT_KEY's lookup key while the child keeps the node itself alive.
+		captures.record("unrelated", capture());
+		assert.equal(captures.resolve(PARENT_KEY), undefined, "precondition: the key is gone");
+
+		// findInheritedPrompts skips a node whose key IS the prompt, so an evicted
+		// exact match would otherwise embed nothing and throw.
+		const revived = captures.resolveOrDerive(PARENT_KEY);
+		assert.equal(revived.contextFiles[0].content, "parent rules");
+		// Revival re-adds a key that was not in the map, so it has to trim like a write.
+		assert.equal(captures.size, 2, "reviving must not grow the map past its bound");
+	});
+
+	it("keeps a parent alive that is only ever resolved, never re-recorded", () => {
+		// The real shape: one long-lived parent agent, then a stream of sub-agents
+		// each recording a prompt of its own. Counting only writes ages the parent out.
+		const captures = new PromptCaptures(4);
+		captures.record(PARENT_KEY, capture({ contextFiles: [{ path: "/AGENTS.md", content: "parent rules" }] }));
+
+		for (let i = 0; i < 8; i++) {
+			assert.ok(captures.resolve(PARENT_KEY), `parent evicted after ${i} sub-agents`);
+			captures.record(`sub-agent prompt ${i}`, capture());
+		}
+
+		assert.ok(captures.resolve(PARENT_KEY), "the parent must survive its own sub-agents");
+		assert.equal(captures.resolve(PARENT_KEY).contextFiles.length, 1);
 	});
 
 	it("throws rather than silently dropping instructions it cannot account for", () => {
