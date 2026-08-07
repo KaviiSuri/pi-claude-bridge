@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.0
 
 - **BREAKING: AskClaude tool now off by default** — If you want to continue using the AskClaude tool, set `askClaude.enabled` to `true` in your config (see README.md).
 - **New: mid-turn steering actually works (issue #39)** — a steer sent while a tool was running used to be stashed and replayed as a follow-up after Claude's whole turn finished. The prompt is now a long-lived streaming generator and the steer is written to CC's stdin (`priority: "next"`) before the tool result is released, so CC drains it at that tool boundary and acts on it in the same turn.

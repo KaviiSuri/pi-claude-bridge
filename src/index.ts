@@ -19,6 +19,7 @@ import { QueryContext, ctx } from "./query-state.js";
 import { makePromptStream, userMessage, type PromptStream } from "./prompt-stream.js";
 import { claudeCodeSettings, loadConfig, markStartupNoticeShown, type Config } from "./config.js";
 import { formatProjectContext } from "./agents-md.js";
+import { PromptCaptures, EMPTY_PROMPT_CAPTURE, type PromptCapture } from "./prompt-capture.js";
 import { collectCarriedAttachments, placeCarriedAttachments, type CarriedAttachment } from "./attachments.js";
 import { createToolServer } from "./mcp-server.js";
 import { buildActionSummary, type ToolCallState } from "./askclaude-ui.js";
@@ -817,46 +818,15 @@ function showStartupNoticeOnce(): void {
 	piUI?.notify(`Claude bridge — settings live in ${path}\n${notices.map((n) => `• ${n}`).join("\n")}`, "info");
 }
 
-// What pi assembled for one agent: the user's own customisation
-// (`--system-prompt`, `--append-system-prompt`) and pi's context-file list,
-// captured from before_agent_start rather than rediscovered so the bridge cannot
-// disagree with pi about what applies. pi's `context.systemPrompt` can't be
-// forwarded wholesale — it describes pi's tools and harness and would fight
-// Claude Code's own preset — but the user's text is theirs and has to reach the
-// model, so it is carried separately and appended after the preset.
-type PromptCapture = { custom?: string; append?: string; contextFiles: { path: string; content: string }[] };
-
-// Keyed by the assembled prompt, not held in a single slot. pi fires
-// before_agent_start once per agent loop and sub-agents run in their own
-// AgentSession, so a single slot is last-writer-wins: a sub-agent overwrote the
-// parent's capture and nothing restored it, leaving every later parent turn with
-// the sub-agent's <sub_agent_context> and none of its own context files, for the
-// rest of the session. Keying makes a mismatch impossible rather than unlikely —
-// agent-session assigns `agent.state.systemPrompt` the same string the event
-// carries, so a query resolves to its own agent's capture or to none at all.
-const promptCaptures = new Map<string, PromptCapture>();
-const EMPTY_PROMPT_CAPTURE: PromptCapture = { contextFiles: [] };
-// pi rebuilds the prompt whenever the tool set changes, so keys accumulate
-// within a session; keep only the most recent few.
-const PROMPT_CAPTURE_LIMIT = 16;
-
-function capturePrompt(systemPrompt: string, capture: PromptCapture): void {
-	promptCaptures.delete(systemPrompt);
-	promptCaptures.set(systemPrompt, capture);
-	for (const key of promptCaptures.keys()) {
-		if (promptCaptures.size <= PROMPT_CAPTURE_LIMIT) break;
-		promptCaptures.delete(key);
-	}
-}
+// Captures of what pi assembled per agent; see src/prompt-capture.ts for why this
+// is keyed rather than held in a single slot.
+const promptCaptures = new PromptCaptures();
 
 function resolvePromptCapture(systemPrompt?: string): PromptCapture {
-	if (!systemPrompt) return EMPTY_PROMPT_CAPTURE;
-	const capture = promptCaptures.get(systemPrompt);
-	// A miss means this query's prompt never came through before_agent_start.
-	// Appending nothing is correct — appending another agent's text is what the
-	// keying exists to prevent — but it is worth seeing, because it also means
-	// the user's own instructions did not reach Claude for this turn.
-	if (!capture) debug(`provider: no prompt capture for this system prompt (${systemPrompt.length} chars)`);
+	const capture = promptCaptures.resolve(systemPrompt);
+	if (!capture && systemPrompt) {
+		debug(`provider: no prompt capture for this system prompt (${systemPrompt.length} chars)`);
+	}
 	return capture ?? EMPTY_PROMPT_CAPTURE;
 }
 
@@ -1925,7 +1895,7 @@ export default function (pi: ExtensionAPI) {
 	// still depends on, so both flags are forwarded as an append.
 	pi.on("before_agent_start", (event) => {
 		const options = event.systemPromptOptions;
-		capturePrompt(event.systemPrompt, {
+		promptCaptures.record(event.systemPrompt, {
 			custom: options?.customPrompt,
 			append: options?.appendSystemPrompt,
 			contextFiles: options?.contextFiles ?? [],
