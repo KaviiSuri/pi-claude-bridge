@@ -6,7 +6,7 @@ import { query, type EffortLevel, type SDKMessage, type SettingSource } from "@a
 import type { Base64ImageSource, ContentBlockParam } from "@anthropic-ai/sdk/resources";
 import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
-import { createSession, deleteSession, repairToolPairing } from "cc-session-io";
+import { createSession, deleteSession, openSession, repairToolPairing } from "cc-session-io";
 import { appendFileSync, mkdirSync, realpathSync, statSync } from "fs";
 import { homedir } from "os";
 import { dirname, join } from "path";
@@ -19,6 +19,7 @@ import { QueryContext, ctx } from "./query-state.js";
 import { makePromptStream, userMessage, type PromptStream } from "./prompt-stream.js";
 import { claudeCodeSettings, loadConfig, markStartupNoticeShown, type Config } from "./config.js";
 import { formatProjectContext } from "./agents-md.js";
+import { collectCarriedAttachments, placeCarriedAttachments, type CarriedAttachment } from "./attachments.js";
 import { createToolServer } from "./mcp-server.js";
 import { buildActionSummary, type ToolCallState } from "./askclaude-ui.js";
 
@@ -221,6 +222,27 @@ interface SessionState {
 	forceRotate?: boolean;
 }
 
+/**
+ * Claude Code's `@file` expansions from the session about to be replaced.
+ *
+ * Must be called before `deleteSession`, which wipes the file they live in —
+ * reading after it yields nothing, with no error to notice.
+ */
+function readCarriedAttachments(sessionId: string, cwd: string): CarriedAttachment[] {
+	try {
+		const previous = openSession({ sessionId, projectPath: cwd, claudeDir: process.env.CLAUDE_CONFIG_DIR });
+		return collectCarriedAttachments(previous.records);
+	} catch (error) {
+		// A post-abort rebuild reads a file the killed CC subprocess may have been
+		// midway through writing, and cc-session-io parses each line with a bare
+		// JSON.parse, so a truncated last line throws. Throwing here would turn a
+		// lost attachment into a failed turn; carrying none is exactly what happened
+		// before this existed, so the failure mode is bounded by the status quo.
+		debug(`WARNING: could not read attachments from session ${sessionId.slice(0, 8)}:`, error);
+		return [];
+	}
+}
+
 let sharedSession: SessionState | null = null;
 
 // Convert pi messages to Anthropic API format for session import.
@@ -234,6 +256,7 @@ function convertAndImportMessages(
 	session: ReturnType<typeof createSession>,
 	messages: Context["messages"],
 	customToolNameToSdk?: Map<string, string>,
+	carried?: readonly CarriedAttachment[],
 ): void {
 	const { anthropicMessages, sanitizedIds, dropped } = convertPiMessages(messages, customToolNameToSdk);
 
@@ -263,7 +286,21 @@ function convertAndImportMessages(
 	if (repaired.length !== anthropicMessages.length) {
 		debug(`convertAndImportMessages: repairToolPairing ${anthropicMessages.length} → ${repaired.length} msgs`);
 	}
-	if (repaired.length) session.importMessages(repaired);
+	// Placement runs against the repaired array because that is the index space
+	// importMessages reads. Attachments are links in CC's uuid chain, so they have
+	// to be written in order with the messages, not appended afterwards.
+	const placed = carried?.length
+		? placeCarriedAttachments(carried, repaired as unknown as { role: string; content: unknown }[])
+		: undefined;
+	if (placed?.skipped.length) {
+		debug(`convertAndImportMessages: dropped ${placed.skipped.length} carried attachment(s): ${placed.skipped.join("; ")}`);
+	}
+	if (placed?.attachments.length) {
+		debug(`convertAndImportMessages: carrying ${placed.attachments.length} attachment(s) across the rebuild`);
+	}
+	if (repaired.length) {
+		session.importMessages(repaired, placed?.attachments.length ? { attachments: placed.attachments } : undefined);
+	}
 }
 
 // Pi doesn't pass tool results directly — it appends them to the context and calls
@@ -651,6 +688,8 @@ function syncSharedSession(
 	// and for any tools that key off them. Skipped only when there's a
 	// concurrent writer we shouldn't race — see forceRotate docs above.
 	const preserveId = previousSessionId !== undefined && !sharedSession?.forceRotate;
+	// Before deleteSession — it wipes the file these live in.
+	const carried = previousSessionId !== undefined ? readCarriedAttachments(previousSessionId, cwd) : [];
 	if (preserveId) {
 		// Wipe prior jsonl + companion dir (no-op if nothing to wipe).
 		deleteSession(previousSessionId!, cwd, process.env.CLAUDE_CONFIG_DIR);
@@ -661,7 +700,7 @@ function syncSharedSession(
 		...(preserveId ? { sessionId: previousSessionId } : {}),
 		...(modelId ? { model: modelId } : {}),
 	});
-	convertAndImportMessages(session, priorMessages, customToolNameToSdk);
+	convertAndImportMessages(session, priorMessages, customToolNameToSdk, carried);
 	session.save();
 	verifyWrittenSession(session.jsonlPath, session.sessionId, session.messages.length, cwd);
 	sharedSession = { sessionId: session.sessionId, cursor: priorMessages.length, cwd };
