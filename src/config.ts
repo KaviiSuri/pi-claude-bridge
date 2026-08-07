@@ -53,12 +53,26 @@ export function globalConfigPath(): string {
 	return join(getAgentDir(), "claude-bridge.json");
 }
 
-/** Record today's date in the global config so the startup notice shows once. Preserves every other field. */
+/** Record today's date in the global config so the startup notice shows once, preserving every
+ *  other field. Returns the config path for display either way.
+ *
+ *  Parses directly rather than through tryParseJson, which reports an unparseable file as `{}`:
+ *  spreading that would replace a user's whole config with just this marker the first time they
+ *  leave a trailing comma in it. Losing the notice is the cheaper failure, so the write is
+ *  skipped and the notice simply shows again next session. */
 export function markStartupNoticeShown(): string {
 	const path = globalConfigPath();
+	let existing: Partial<Config> = {};
+	if (existsSync(path)) {
+		try {
+			existing = JSON.parse(readFileSync(path, "utf-8"));
+		} catch (e) {
+			console.error(`claude-bridge: leaving ${path} alone, it does not parse: ${e}`);
+			return path;
+		}
+	}
 	// en-CA renders YYYY-MM-DD in local time; toISOString() would report UTC.
-	const today = new Date().toLocaleDateString("en-CA");
-	const next = { ...tryParseJson(path), startupNoticeShown: today };
+	const next = { ...existing, startupNoticeShown: new Date().toLocaleDateString("en-CA") };
 	mkdirSync(dirname(path), { recursive: true });
 	writeFileSync(path, `${JSON.stringify(next, null, 2)}\n`);
 	return path;

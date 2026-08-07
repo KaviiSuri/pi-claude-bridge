@@ -99,6 +99,17 @@ describe("loadConfig", () => {
 		}
 	}));
 
+	it("markStartupNoticeShown leaves an unparseable config untouched", () => withTempHome(() => {
+		const globalDir = getAgentDir();
+		mkdirSync(globalDir, { recursive: true });
+		const path = join(globalDir, "claude-bridge.json");
+		const malformed = '{ "askClaude": { "enabled": true }, }';
+		writeFileSync(path, malformed);
+
+		markStartupNoticeShown();
+		assert.equal(readFileSync(path, "utf-8"), malformed, "a typo must not cost the user their config");
+	}));
+
 	it("markStartupNoticeShown creates the config when there is none", () => withTempHome(() => {
 		const cwd = mkdtempSync(join(tmpdir(), "claude-bridge-project-"));
 		try {
