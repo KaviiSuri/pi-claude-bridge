@@ -819,7 +819,11 @@ function showStartupNoticeOnce(): void {
 	const notices = pendingNotices;
 	pendingNotices = [];
 	const path = markStartupNoticeShown();
-	piUI?.notify(`Claude bridge — settings live in ${path}\n${notices.map((n) => `• ${n}`).join("\n")}`, "info");
+	// pi wraps the whole notify string in the theme's dim foreground; the inner reset
+	// drops back to the terminal default rather than dim, which is fine here.
+	const title = `\x1b[33mWelcome to pi-claude-bridge\x1b[39m — settings live in ${path}`;
+	const bullets = [...notices, "This message only appears once. See README.md for more."].map((n) => `• ${n}`);
+	piUI?.notify([title, ...bullets, "─".repeat(64)].join("\n"), "info");
 }
 
 // Captures of what pi assembled per agent; see src/prompt-capture.ts for why this
@@ -1922,8 +1926,8 @@ export default function (pi: ExtensionAPI) {
 	const registeredModels = applyLongContext(MODELS, longContextSettings);
 
 	if (!config.startupNoticeShown) {
-		if (config.provider?.plan === undefined) pendingNotices.push('Assuming a Pro plan. On Max (or Team Premium/Enterprise), set provider.plan to "max" to unlock Opus at 1M context.');
-		if (config.askClaude?.enabled === undefined) pendingNotices.push("The AskClaude tool is opt-in and is not registered. Set askClaude.enabled to true to use it.");
+		if (config.provider?.plan === undefined) pendingNotices.push('Are you using a Max plan? You need to set provider.plan to "max" to unlock 1M context in Opus.');
+		if (config.askClaude?.enabled === undefined) pendingNotices.push("The AskClaude tool is opt-in only. Set askClaude.enabled to use it.");
 	}
 
 	// Reset shared session on pi session lifecycle events
