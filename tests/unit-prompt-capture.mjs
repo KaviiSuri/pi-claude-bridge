@@ -1,64 +1,203 @@
 #!/usr/bin/env node
-// Unit tests for per-agent system prompt captures (prompt-capture.ts).
-//
-// The bug this guards: pi fires before_agent_start once per agent loop and
-// sub-agents run in their own AgentSession, so holding the capture in a single
-// slot was last-writer-wins. A sub-agent overwrote the parent's and nothing put it
-// back, so every later parent turn carried the sub-agent's <sub_agent_context> —
-// telling the main agent it was a sub-agent — and lost its own context files for
-// the rest of the session. Nothing surfaced it.
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { PromptCaptures } from "../src/prompt-capture.js";
+import { collectPromptSkills, projectPromptCapture, PromptCaptures } from "../src/prompt-capture.js";
 
-const PARENT = "parent prompt\n<project_context>AGENTS.md</project_context>";
-const SUBAGENT = "sub-agent prompt\n<sub_agent_context>you are a sub-agent</sub_agent_context>";
-const parentCapture = { custom: "parent custom", contextFiles: [{ path: "/AGENTS.md", content: "rules" }] };
-const subCapture = { custom: "sub custom", contextFiles: [] };
+const PI_HARNESS = "You are an expert coding assistant operating inside pi. Pi documentation: pi packages (docs/packages.md).";
+const PARENT_KEY = `${PI_HARNESS}\n\n<project_context>raw parent context</project_context>\nCurrent working directory: /parent`;
+const CHILD_SUFFIX = `\n\n<sub_agent_context>child rules</sub_agent_context>\n\n<active_agent name="Plan"/>\n\n# Environment\nWorking directory: /child\n\n<agent_instructions>plan carefully</agent_instructions>`;
+const CHILD_KEY = `${PARENT_KEY}${CHILD_SUFFIX}\nCurrent working directory: /child`;
+
+function skill(name, { disabled = false } = {}) {
+	return {
+		name,
+		description: `${name} description`,
+		filePath: `/skills/${name}/SKILL.md`,
+		baseDir: `/skills/${name}`,
+		sourceInfo: { source: "test", scope: "temporary", origin: "top-level" },
+		disableModelInvocation: disabled,
+	};
+}
+
+function capture(overrides = {}) {
+	return { contextFiles: [], skills: [], ...overrides };
+}
+
+function project(captures, key, skillReadTool = "mcp") {
+	const found = captures.resolve(key);
+	assert.ok(found, `missing capture for ${key.slice(0, 30)}`);
+	return projectPromptCapture(found, { skillReadTool });
+}
+
+function occurrences(text, needle) {
+	return text.split(needle).length - 1;
+}
 
 describe("PromptCaptures", () => {
-	it("a sub-agent starting does not disturb the parent's capture", () => {
+	it("keeps parent and child captures isolated", () => {
 		const captures = new PromptCaptures();
-		captures.record(PARENT, parentCapture);
-		captures.record(SUBAGENT, subCapture);
+		captures.record(PARENT_KEY, capture({ contextFiles: [{ path: "/AGENTS.md", content: "parent rules" }] }));
+		captures.record(CHILD_KEY, capture({ custom: `${PARENT_KEY}${CHILD_SUFFIX}` }));
 
-		// The regression: this used to return the sub-agent's capture.
-		assert.deepEqual(captures.resolve(PARENT), parentCapture);
-		assert.deepEqual(captures.resolve(SUBAGENT), subCapture);
-	});
-
-	it("the parent keeps its context files after a sub-agent runs", () => {
-		const captures = new PromptCaptures();
-		captures.record(PARENT, parentCapture);
-		captures.record(SUBAGENT, subCapture);
-		// ctxFiles went 1 -> 0 and stayed there for the rest of the session.
-		assert.equal(captures.resolve(PARENT).contextFiles.length, 1);
-	});
-
-	it("resolves to nothing rather than to another agent's capture", () => {
-		const captures = new PromptCaptures();
-		captures.record(SUBAGENT, subCapture);
-		// A prompt never seen must not inherit whatever was recorded last.
-		assert.equal(captures.resolve("some other agent's prompt"), undefined);
+		assert.equal(captures.resolve(PARENT_KEY).contextFiles.length, 1);
+		assert.equal(captures.resolve(CHILD_KEY).contextFiles.length, 0);
+		assert.equal(captures.resolve("unknown"), undefined);
 		assert.equal(captures.resolve(undefined), undefined);
 	});
 
-	it("re-recording the same prompt replaces rather than duplicates", () => {
+	it("derives a transient capture when a later extension wrapped the prompt", () => {
 		const captures = new PromptCaptures();
-		captures.record(PARENT, parentCapture);
-		captures.record(PARENT, subCapture);
-		assert.equal(captures.size, 1);
-		assert.deepEqual(captures.resolve(PARENT), subCapture);
+		captures.record(PARENT_KEY, capture({
+			contextFiles: [{ path: "/AGENTS.md", content: "parent rules" }],
+			skills: [skill("browser")],
+		}));
+
+		// What an extension loading after the bridge produces: our recorded prompt,
+		// wrapped in text we never saw.
+		const wrapped = `PREFIX FROM ANOTHER EXTENSION\n\n${PARENT_KEY}\n\nSUFFIX`;
+		const derived = captures.resolveOrDerive(wrapped);
+		const projected = projectPromptCapture(derived, { skillReadTool: "mcp" });
+
+		assert.match(projected, /parent rules/, "the wrapped prompt's own instructions must survive");
+		assert.match(projected, /browser/, "and so must its skills");
+		assert.doesNotMatch(projected, /PREFIX FROM ANOTHER EXTENSION|SUFFIX/, "but not the surrounding text");
+		assert.doesNotMatch(projected, /Pi documentation/, "and never Pi's harness");
+		assert.equal(captures.resolve(wrapped), undefined, "a derived capture is not retained");
 	});
 
-	it("is bounded, evicting least-recently-recorded first", () => {
+	it("throws rather than silently dropping instructions it cannot account for", () => {
+		const captures = new PromptCaptures();
+		captures.record(PARENT_KEY, capture({ contextFiles: [{ path: "/AGENTS.md", content: "parent rules" }] }));
+
+		assert.throws(
+			() => captures.resolveOrDerive("a prompt sharing nothing with what we recorded"),
+			/no capture for this .* system prompt/,
+		);
+		// No prompt at all is not a loss — there is nothing to forward.
+		assert.equal(captures.resolveOrDerive(undefined), undefined);
+	});
+
+	it("recursively projects an inherited prompt without Pi's harness", () => {
+		const browser = skill("browser");
+		const captures = new PromptCaptures();
+		captures.record(PARENT_KEY, capture({
+			contextFiles: [{ path: "/AGENTS.md", content: "parent rules" }],
+			skills: [browser],
+		}));
+		captures.record(CHILD_KEY, capture({ custom: `${PARENT_KEY}${CHILD_SUFFIX}`, skills: [browser] }));
+
+		const parent = project(captures, PARENT_KEY);
+		const child = project(captures, CHILD_KEY);
+		assert.ok(child.startsWith(parent), "child should retain the parent's projected cache prefix");
+		assert.doesNotMatch(child, /operating inside pi|pi packages/);
+		assert.match(child, /parent rules/);
+		assert.match(child, /<sub_agent_context>child rules<\/sub_agent_context>/);
+		assert.match(child, /<active_agent name="Plan"\/>/);
+		assert.match(child, /<agent_instructions>plan carefully<\/agent_instructions>/);
+		assert.equal(occurrences(child, "/skills/browser/SKILL.md"), 1);
+	});
+
+	it("leaves direct custom and replace-mode prompts byte-identical", () => {
+		const captures = new PromptCaptures();
+		captures.record("direct assembled", capture({ custom: "  direct user instructions\n" }));
+		captures.record("replace assembled", capture({ custom: "<active_agent name=\"review\"/>\nreplace instructions" }));
+
+		assert.equal(project(captures, "direct assembled"), "  direct user instructions\n");
+		assert.equal(project(captures, "replace assembled"), "<active_agent name=\"review\"/>\nreplace instructions");
+	});
+
+	it("uses the longest inherited key for nested agents", () => {
+		const captures = new PromptCaptures();
+		captures.record(PARENT_KEY, capture({ contextFiles: [{ path: "/AGENTS.md", content: "parent rules" }] }));
+		captures.record(CHILD_KEY, capture({ custom: `${PARENT_KEY}${CHILD_SUFFIX}` }));
+		const grandSuffix = "\n\n<sub_agent_context>grandchild rules</sub_agent_context>";
+		const grandKey = `${CHILD_KEY}${grandSuffix}\nCurrent working directory: /grandchild`;
+		captures.record(grandKey, capture({ custom: `${CHILD_KEY}${grandSuffix}` }));
+
+		const grandchild = project(captures, grandKey);
+		assert.doesNotMatch(grandchild, /operating inside pi|Current working directory: \/parent|Current working directory: \/child/);
+		assert.equal(occurrences(grandchild, "parent rules"), 1);
+		assert.match(grandchild, /child rules/);
+		assert.match(grandchild, /grandchild rules/);
+	});
+
+	it("retains inherited nodes after their lookup keys are evicted", () => {
+		const captures = new PromptCaptures(2);
+		captures.record(PARENT_KEY, capture({ contextFiles: [{ path: "/AGENTS.md", content: "survives eviction" }] }));
+		captures.record(CHILD_KEY, capture({ custom: `${PARENT_KEY}${CHILD_SUFFIX}` }));
+		captures.record("unrelated", capture());
+
+		assert.equal(captures.resolve(PARENT_KEY), undefined);
+		assert.match(project(captures, CHILD_KEY), /survives eviction/);
+	});
+
+	it("relinks an evicted ancestor through the live inheritance graph", () => {
+		const captures = new PromptCaptures(2);
+		captures.record(PARENT_KEY, capture({ contextFiles: [{ path: "/AGENTS.md", content: "reachable ancestor" }] }));
+		captures.record(CHILD_KEY, capture({ custom: `${PARENT_KEY}${CHILD_SUFFIX}` }));
+		captures.record("unrelated", capture());
+		const changedKey = "changed child assembled prompt";
+		captures.record(changedKey, capture({ custom: `${PARENT_KEY}\n\nchanged child rules` }));
+
+		const changed = project(captures, changedKey);
+		assert.doesNotMatch(changed, /operating inside pi/);
+		assert.match(changed, /reachable ancestor/);
+		assert.match(changed, /changed child rules/);
+	});
+
+	it("updates descendants through a re-recorded parent node", () => {
+		const captures = new PromptCaptures();
+		captures.record(PARENT_KEY, capture({ contextFiles: [{ path: "/AGENTS.md", content: "rules v1" }] }));
+		captures.record(CHILD_KEY, capture({ custom: `${PARENT_KEY}${CHILD_SUFFIX}` }));
+		captures.record(PARENT_KEY, capture({ contextFiles: [{ path: "/AGENTS.md", content: "rules v2" }] }));
+		captures.record(CHILD_KEY, capture({ custom: `${PARENT_KEY}${CHILD_SUFFIX}`, append: "child append" }));
+
+		const child = project(captures, CHILD_KEY);
+		assert.doesNotMatch(child, /rules v1|operating inside pi/);
+		assert.match(child, /rules v2/);
+		assert.match(child, /child append$/);
+	});
+
+	it("projects every non-overlapping occurrence of an inherited prompt", () => {
+		const captures = new PromptCaptures();
+		captures.record(PARENT_KEY, capture({ contextFiles: [{ path: "/AGENTS.md", content: "repeated rules" }] }));
+		const repeatedCustom = `${PARENT_KEY}\nseparator\n${PARENT_KEY}`;
+		captures.record("repeated child", capture({ custom: repeatedCustom }));
+
+		const result = project(captures, "repeated child");
+		assert.doesNotMatch(result, /operating inside pi/);
+		assert.equal(occurrences(result, "repeated rules"), 2);
+	});
+
+	it("deduplicates inherited skills and preserves child-only skills", () => {
+		const browser = skill("browser");
+		const review = skill("review");
+		const captures = new PromptCaptures();
+		captures.record(PARENT_KEY, capture({ skills: [browser] }));
+		captures.record(CHILD_KEY, capture({ custom: `${PARENT_KEY}${CHILD_SUFFIX}`, skills: [browser, review] }));
+
+		const childCapture = captures.resolve(CHILD_KEY);
+		assert.deepEqual(collectPromptSkills(childCapture).map(({ name }) => name), ["browser", "review"]);
+		const result = projectPromptCapture(childCapture, { skillReadTool: "mcp" });
+		assert.equal(occurrences(result, "/skills/browser/SKILL.md"), 1);
+		assert.equal(occurrences(result, "/skills/review/SKILL.md"), 1);
+	});
+
+	it("allows an enabled child skill when the inherited copy is hidden", () => {
+		const captures = new PromptCaptures();
+		captures.record(PARENT_KEY, capture({ skills: [skill("browser", { disabled: true })] }));
+		captures.record(CHILD_KEY, capture({ custom: `${PARENT_KEY}${CHILD_SUFFIX}`, skills: [skill("browser")] }));
+		assert.equal(occurrences(project(captures, CHILD_KEY), "/skills/browser/SKILL.md"), 1);
+	});
+
+	it("is bounded and evicts the least-recently-recorded key", () => {
 		const captures = new PromptCaptures(3);
-		captures.record("a", { contextFiles: [] });
-		captures.record("b", { contextFiles: [] });
-		captures.record("c", { contextFiles: [] });
-		captures.record("a", { contextFiles: [], custom: "refreshed" });  // a becomes newest
-		captures.record("d", { contextFiles: [] });                      // evicts b
+		captures.record("a", capture());
+		captures.record("b", capture());
+		captures.record("c", capture());
+		captures.record("a", capture({ custom: "refreshed" }));
+		captures.record("d", capture());
 
 		assert.equal(captures.size, 3);
 		assert.equal(captures.resolve("b"), undefined);

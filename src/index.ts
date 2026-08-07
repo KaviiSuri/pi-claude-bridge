@@ -12,14 +12,17 @@ import { homedir } from "os";
 import { dirname, join } from "path";
 import { PROVIDER_ID, messageContentToText, convertPiMessages } from "./convert.js";
 import { applyLongContext, buildModels, claudeCodeModelId, type LongContextSettings, resolveModel as _resolveModel } from "./models.js";
-import { MCP_SERVER_NAME, MCP_TOOL_PREFIX, extractSkillsBlock } from "./skills.js";
+import { MCP_SERVER_NAME, MCP_TOOL_PREFIX, renderSkillsBlock } from "./skills.js";
 import { verifyWrittenSession as _verifyWrittenSession } from "./session-verify.js";
 import { extractAllToolResults as _extractAllToolResults, type McpResult } from "./extract-tool-results.js";
 import { QueryContext, ctx } from "./query-state.js";
 import { makePromptStream, userMessage, type PromptStream } from "./prompt-stream.js";
 import { claudeCodeSettings, loadConfig, markStartupNoticeShown, type Config } from "./config.js";
-import { formatProjectContext } from "./agents-md.js";
-import { PromptCaptures, EMPTY_PROMPT_CAPTURE, type PromptCapture } from "./prompt-capture.js";
+import {
+	collectPromptSkills,
+	projectPromptCapture,
+	PromptCaptures,
+} from "./prompt-capture.js";
 import { collectCarriedAttachments, placeCarriedAttachments, type CarriedAttachment } from "./attachments.js";
 import { createToolServer } from "./mcp-server.js";
 import { buildActionSummary, type ToolCallState } from "./askclaude-ui.js";
@@ -822,14 +825,6 @@ function showStartupNoticeOnce(): void {
 // is keyed rather than held in a single slot.
 const promptCaptures = new PromptCaptures();
 
-function resolvePromptCapture(systemPrompt?: string): PromptCapture {
-	const capture = promptCaptures.resolve(systemPrompt);
-	if (!capture && systemPrompt) {
-		debug(`provider: no prompt capture for this system prompt (${systemPrompt.length} chars)`);
-	}
-	return capture ?? EMPTY_PROMPT_CAPTURE;
-}
-
 function contextForToolResults(results: McpResult[]): QueryContext | undefined {
 	for (const result of results) {
 		const id = result.toolCallId;
@@ -1460,6 +1455,18 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	queryCtx.latestCursor = 0;
 
 	const { mcpTools, customToolNameToSdk, customToolNameToPi } = resolveMcpTools(context, askClaudeToolName);
+	// Resolved before anything mutates session state, so an unaccountable prompt
+	// fails the turn cleanly rather than midway through building the query.
+	// Build from what Pi loaded for this run, so `--no-context-files` and
+	// `--no-skills` reach Claude Code by leaving nothing to forward. A sub-agent's
+	// custom override embeds its parent's assembled Pi prompt; recursive projection
+	// replaces that exact inherited prompt with its already-safe portable parts.
+	const promptCapture = promptCaptures.resolveOrDerive(context.systemPrompt);
+	const systemPromptAppend = promptCapture
+		? projectPromptCapture(promptCapture, {
+			skillReadTool: mcpTools.some((tool) => tool.name === "read") ? "mcp" : "none",
+		})
+		: undefined;
 	const cwd = (options as { cwd?: string } | undefined)?.cwd ?? process.cwd();
 	// cliModel is the actual id sent to Claude Code (may carry [1m]); model.id is the
 	// pi-registered id. Log cliModel so debug lines reflect what CC actually received.
@@ -1495,17 +1502,6 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		.catch((error) => debug(`provider: initial prompt push rejected:`, error));
 	queryCtx.promptStream = promptStream;
 	const mcpServers = buildMcpServers(mcpTools, queryCtx);
-	// Both come from what Pi loaded for this run, so `--no-context-files` and
-	// `--no-skills` reach Claude Code by leaving nothing to forward.
-	// Resolved per query from this turn's own prompt, so a concurrent sub-agent
-	// cannot contribute its context files or its <sub_agent_context> to a parent turn.
-	const promptCapture = resolvePromptCapture(context.systemPrompt);
-	const agentsAppend = formatProjectContext(promptCapture.contextFiles);
-	const skillsAppend = extractSkillsBlock(context.systemPrompt);
-	// Last, so the user's own instructions win over anything the bridge adds.
-	const appendParts = [agentsAppend, skillsAppend, promptCapture.custom, promptCapture.append]
-		.filter((part): part is string => Boolean(part));
-	const systemPromptAppend = appendParts.length > 0 ? appendParts.join("\n\n") : undefined;
 
 	// MCP auto-loading suppression: CC reads MCP servers from ~/.claude.json (top-level
 	// + per-project) and .mcp.json. Since pi executes tools (not CC), those are pure
@@ -1721,9 +1717,16 @@ async function promptAndWait(
 	// Mode → disallowed tools
 	const disallowedTools = MODE_DISALLOWED_TOOLS[mode] ?? [];
 
-	// Skills append
-	const skillsBlock = options?.appendSkills !== false && options?.systemPrompt
-		? extractSkillsBlock(options.systemPrompt) : undefined;
+	// AskClaude uses Claude Code's native Read tool rather than Pi's MCP bridge.
+	// Same resolver as the provider path: a prompt neither recorded nor derivable
+	// throws here too, rather than silently sending Claude Code no skills.
+	const skillCapture = promptCaptures.resolveOrDerive(options?.systemPrompt);
+	const skillsBlock = options?.appendSkills !== false && skillCapture
+		? renderSkillsBlock(
+			collectPromptSkills(skillCapture),
+			disallowedTools.includes("Read") ? "none" : "native",
+		)
+		: undefined;
 
 	// Effort
 	const effort = options?.thinking && options.thinking !== "off"
@@ -1895,10 +1898,12 @@ export default function (pi: ExtensionAPI) {
 	// still depends on, so both flags are forwarded as an append.
 	pi.on("before_agent_start", (event) => {
 		const options = event.systemPromptOptions;
+		const hasRead = !options?.selectedTools || options.selectedTools.includes("read");
 		promptCaptures.record(event.systemPrompt, {
 			custom: options?.customPrompt,
 			append: options?.appendSystemPrompt,
 			contextFiles: options?.contextFiles ?? [],
+			skills: hasRead ? options?.skills ?? [] : [],
 		});
 	});
 	pi.on("session_shutdown", () => clearSession("session_shutdown"));
