@@ -221,6 +221,60 @@ No repro, so there is nothing to write yet. Re-run the scanners with
   applicable to AskClaude subagents. See `fractary/pi-claude-code`
   `PlanMode.ts`.
 
+## Testing strategy
+
+A review session found ten real bugs. The unit suite found roughly none of them and
+stayed green throughout; the throw in `resolveOrDerive` found two, `audit-warnings.mjs`
+caught the phantom-tool deadlock live, and a 135-message session on disk was the
+fixture for the eviction bug. That is the datum to design around.
+
+The reason is structural: in glue code the bug is a false belief about the
+counterparty, and a hand-written fixture encodes the same belief as the code. The
+queue tests paired by id *by construction* because we believed pairing was by id, and
+stayed green through the whole mispairing bug. So the question for any new test is
+where its inputs and its oracle come from that did not pass through our own head.
+Only three sources qualify: recorded real traffic, the live counterparty, and
+conservation laws ("nothing vanished") that hold without knowing the right answer.
+
+Ranked by leverage per effort:
+
+1. **Quiescence and leak assertions.** After a turn settles, `activeQueryContexts`
+   should be empty, no tool call pending, no prompt stream live. The
+   `activeQueryContexts` leak was present on *every* run of the happy path — it
+   needed no adversarial interleaving, just an assertion that anything ends clean.
+   Shipped as a debug-gated shutdown dump so real sessions report it too.
+2. **Corpus replay as a release gate.** `diag/replay-write-path.mjs` replays one
+   session on suspicion; point it at every session on disk and assert zero synthetic
+   stubs, zero skipped attachments, no capture throws. `placeCarriedAttachments`
+   already returns `skipped` — the accounting existed and the `@file` bug happened
+   anyway, because no hand-written fixture contained a mid-turn steer. Accounting
+   plus synthetic fixtures stays green; accounting plus the real corpus goes red.
+3. **Fixture provenance, and drive production objects.** Counterparty-shaped test
+   input must be recorded (`tests/fixtures/sdk-streams`, `tests/lib/record-sdk-streams.mjs`),
+   never hand-written; a test must drive the real object through its real entry point
+   rather than a model of it. Corollary: a regression test never observed failing
+   without its fix is not evidence.
+4. **`strictNullChecks`.** Exactly 27 errors today (13 `convert.ts`, 9 `index.ts`,
+   5 `session-verify.ts`). The tsconfig comment fears `!` noise, but each forced `!`
+   marks a nullable-at-type-level, non-null-by-invariant claim — the exact category of
+   unchecked belief that keeps biting. Hygiene, not strategy: it catches its own class
+   and nothing else.
+5. **Source-inventory tripwires over pi.** Claude Code is closed, so we probe it;
+   pi is installed in `node_modules`, so read it. A behavioural contract file can only
+   probe entry points we already know about, which is why nothing caught branch
+   summarization routing through the agent stream function. Assert instead that the
+   set of pi modules consuming `streamFn` still matches the handled list, so a new one
+   goes red at bump time.
+6. **Byte conservation on `projectPromptCapture`** — wrap a recorded prompt in
+   arbitrary text and assert every byte outside the substituted spans survives.
+
+Not worth doing: randomised sequence/invariant harnesses (their invariants come from
+the same head that wrote the bug — the eviction bug's wrong spec would have been
+asserted as the invariant, and the promise-ordering bug lives below the abstraction
+such a harness would model); boundary fuzzing (the failures are semantic
+disagreements between two structured systems, not parser crashes); mutation testing
+in CI; live shadow execution, which recorded-traffic replay subsumes at no API cost.
+
 ## Lower-priority testing gaps
 
 - **Structured diagnostics for tests**: Tests grep debug-log strings to verify
