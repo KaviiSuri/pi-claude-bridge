@@ -1802,18 +1802,25 @@ async function promptAndWait(
 		`isolated=${options?.isolated ?? false} resume=${resumeSessionId?.slice(0, 8) ?? "none"}`,
 		`skills=${Boolean(skillsBlock)} promptLen=${prompt.length}`);
 
+	// skills: [] suppresses Claude Code's own skill listing, a system-reminder naming every
+	// skill under the ~/.claude estate. The provider path gets this for free — `tools: []`
+	// removes the Skill tool and the listing with it — but AskClaude runs on CC's native
+	// tools, so it has to be asked for. Pi-side skills still arrive via skillsBlock below,
+	// which is meant to be the only channel.
 	const sdkQuery = query({
 		prompt,
 		options: {
 			cwd,
 			env: { ...process.env, ...CC_CHILD_ENV },
 			permissionMode: "bypassPermissions",
-			settings: claudeCodeSettings(providerSettings),
+			settings: { ...claudeCodeSettings(providerSettings), claudeMdExcludes: CLAUDE_MD_EXCLUDES },
+			skills: [],
 			...(disallowedTools.length ? { disallowedTools } : {}),
 			...(effort ? { effort } : {}),
-			systemPrompt: skillsBlock
-				? { type: "preset", preset: "claude_code", append: skillsBlock }
-				: undefined,
+			// Preset unconditionally: omitting it leaves the child on the SDK's bare default,
+			// without the tool and permission guidance the bridge relies on everywhere else.
+			// Whether pi has skills to append is unrelated to whether the child needs that.
+			systemPrompt: { type: "preset", preset: "claude_code", append: skillsBlock },
 			settingSources: ["user", "project"] as SettingSource[],
 			extraArgs,
 			...(resumeSessionId ? { resume: resumeSessionId } : {}),
