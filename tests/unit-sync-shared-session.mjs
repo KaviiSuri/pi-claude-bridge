@@ -3,15 +3,18 @@
  */
 import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createSession, deleteSession, openSession } from "cc-session-io";
 
 const { __test } = await import("../src/index.js");
 
 describe("syncSharedSession", () => {
 	afterEach(() => {
 		__test.resetSharedSession();
+		__test.setPiUI(null);
 	});
 
 	// The branch this exercises is the guard that stops a reentrant subagent from
@@ -50,6 +53,55 @@ describe("syncSharedSession", () => {
 			);
 			assert.deepEqual(__test.getSharedSession(), mainSession);
 		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
+	// The rebuilt file holds one line per record, and a carried `@file` expansion
+	// is an `attachment` record — which `session.messages` filters out. Counting
+	// messages told every user who at-mentioned a file before switching providers
+	// that their session was corrupt, and asked them to open an issue about it.
+	it("does not report a count mismatch when a rebuild carries an attachment", () => {
+		const cwd = mkdtempSync(join(tmpdir(), "sync-shared-session-"));
+		const sessionId = randomUUID();
+		const prompt = "Review @fixture.txt and remember it.";
+		const notices = [];
+		try {
+			const seeded = createSession({ sessionId, projectPath: cwd });
+			seeded.importMessages(
+				[
+					{ role: "user", content: prompt },
+					{ role: "assistant", content: [{ type: "text", text: "Noted." }] },
+				],
+				{
+					attachments: [{
+						afterIndex: 0,
+						attachment: {
+							type: "file",
+							filename: join(cwd, "fixture.txt"),
+							content: { type: "text", file: { filePath: join(cwd, "fixture.txt"), content: "token" } },
+						},
+					}],
+				},
+			);
+			seeded.save();
+
+			__test.setSharedSession({ sessionId, cursor: 0, cwd });
+			__test.setPiUI({ notify: (message) => notices.push(message) });
+			__test.syncSharedSession([
+				{ role: "user", content: prompt, timestamp: Date.now() },
+				{ role: "assistant", content: [{ type: "text", text: "Noted." }], timestamp: Date.now() },
+				{ role: "user", content: "Now what did it say?", timestamp: Date.now() },
+			], cwd);
+
+			assert.equal(
+				openSession({ sessionId, projectPath: cwd }).attachments.length,
+				1,
+				"the rebuild did not carry the attachment, so this proves nothing about the count",
+			);
+			assert.deepEqual(notices, []);
+		} finally {
+			deleteSession(sessionId, cwd);
 			rmSync(cwd, { recursive: true, force: true });
 		}
 	});

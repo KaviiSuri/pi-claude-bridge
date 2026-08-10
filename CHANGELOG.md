@@ -1,5 +1,9 @@
 # Changelog
 
+## UNRELEASED
+
+- **Fix: Bogus debug message about "record count mismatch" after switching providers** — the post-rebuild integrity check did not take `@file` expansion into account when switching providers.
+
 ## 0.7.0 — 2026-08-08
 
 - **BREAKING: AskClaude tool now off by default** — If you want to continue using the AskClaude tool, set `askClaude.enabled` to `true` in your config (see README.md).
