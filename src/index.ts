@@ -150,6 +150,16 @@ function diagDump(label: string, data: Record<string, unknown>) {
 // registration can occur for the next session.
 const ACTIVE_STREAM_SIMPLE_KEY = Symbol.for("claude-bridge:activeStreamSimple");
 
+// Every live module instance's streamSimple, so the dispatcher below still has a
+// valid target after the instance that first registered shuts down.
+const LIVE_STREAM_SIMPLE_KEY = Symbol.for("claude-bridge:liveStreamSimples");
+
+// One stable function shared by every ModelRegistry. Hosts like bb run several
+// independent sessions in a single process, each with its own ModelRegistry, so
+// registration has to happen per session; routing through this indirection keeps
+// a later registration from clobbering an earlier session's in-flight state.
+const DISPATCH_STREAM_SIMPLE_KEY = Symbol.for("claude-bridge:dispatchStreamSimple");
+
 // Claude Code's own builtin tools, for the AskClaude path where CC really runs
 // them. The provider path never sees these — it starts CC with `tools: []`.
 const SDK_TO_PI_TOOL_NAME: Record<string, string> = {
@@ -2019,9 +2029,13 @@ export default function (pi: ExtensionAPI) {
 		// This allows /reload to work — the old instance clears the flag so
 		// the new instance can register fresh without wrapping stale state.
 		const g = globalThis as Record<symbol, any>;
+		const live: Set<any> | undefined = g[LIVE_STREAM_SIMPLE_KEY];
+		live?.delete(streamClaudeAgentSdk);
 		if (g[ACTIVE_STREAM_SIMPLE_KEY] === streamClaudeAgentSdk) {
 			debug(`${event}: clearing ACTIVE_STREAM_SIMPLE_KEY`);
-			g[ACTIVE_STREAM_SIMPLE_KEY] = undefined;
+			// Hand off to another live instance rather than leaving registered
+			// providers in other sessions pointing at a torn-down instance.
+			g[ACTIVE_STREAM_SIMPLE_KEY] = live && live.size > 0 ? [...live].at(-1) : undefined;
 		}
 	};
 	pi.on("session_start", (event, ctx) => {
@@ -2138,24 +2152,31 @@ export default function (pi: ExtensionAPI) {
 	// See ACTIVE_STREAM_SIMPLE_KEY for the full mechanism.
 
 	const g = globalThis as Record<symbol, any>;
-	if (!g[ACTIVE_STREAM_SIMPLE_KEY]) {
-		// First instance: store our streamSimple and register.
-		g[ACTIVE_STREAM_SIMPLE_KEY] = streamClaudeAgentSdk;
-		pi.registerProvider(PROVIDER_ID, {
-			baseUrl: "claude-bridge",
-			apiKey: "not-used",
-			api: "claude-bridge",
-			models: registeredModels,
-			// Cast: pi-ai AssistantMessageEventStream diamond dep between pi-coding-agent and pi-agent-core
-			streamSimple: streamClaudeAgentSdk as any,
-		});
-	} else {
-		// Subsequent instance (subagent session): skip registration entirely.
-		// The subagent already has access to claude-bridge models via the shared
-		// ModelRegistry from the parent's registration. Calls to those models
-		// route through the parent's streamSimple via reentrant QueryContexts.
-		debug(`provider: skipping re-registration, parent instance active (module=${moduleInstanceId})`);
-	}
+	const liveStreamSimples: Set<any> = (g[LIVE_STREAM_SIMPLE_KEY] ??= new Set());
+	liveStreamSimples.add(streamClaudeAgentSdk);
+
+	// The first instance to arrive owns the active implementation, so a subagent
+	// loading this module never takes tool routing away from its parent.
+	g[ACTIVE_STREAM_SIMPLE_KEY] ??= streamClaudeAgentSdk;
+
+	const dispatchStreamSimple = (g[DISPATCH_STREAM_SIMPLE_KEY] ??= ((...args: any[]) => {
+		const active = g[ACTIVE_STREAM_SIMPLE_KEY] ?? [...(g[LIVE_STREAM_SIMPLE_KEY] as Set<any>)].at(-1);
+		if (!active) throw new Error("claude-bridge: no live provider instance");
+		return active(...args);
+	}));
+
+	// Registered unconditionally. A ModelRegistry is per session, not per process,
+	// so skipping this for later instances left every session after the first with
+	// no claude-bridge models at all.
+	debug(`provider: registering (module=${moduleInstanceId}, live=${liveStreamSimples.size})`);
+	pi.registerProvider(PROVIDER_ID, {
+		baseUrl: "claude-bridge",
+		apiKey: "not-used",
+		api: "claude-bridge",
+		models: registeredModels,
+		// Cast: pi-ai AssistantMessageEventStream diamond dep between pi-coding-agent and pi-agent-core
+		streamSimple: dispatchStreamSimple as any,
+	});
 
 	// --- AskClaude tool ---
 
