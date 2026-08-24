@@ -2,6 +2,8 @@
 
 ## UNRELEASED
 
+- **Fix: git-status changes no longer bust the prompt cache (issue #73)** — the `claude_code` preset embeds a git-status snapshot in the cached system block, so any git transition (new file, staging, commit) rewrote the whole conversation prefix at cache-write rates. The provider path now sets `includeGitInstructions: false`, stripping the block with no other cost.
+
 - **Fix: rate-limit warning showed 1% and repeated every request** — the SDK reports `utilization` as a fraction (0.98), but the notification rounded it directly, printing "1% used" at 98% of the window. It now shows true percentages and only re-notifies when usage rises past a new 5% step or the threshold changes, instead of once per request while over the threshold.
 
 - **Fix: an unresolvable system prompt now logs why** — when the prompt-capture resolver throws, the bridge writes to the debug log the closest known capture and the first offset where the unmatched prompt diverges from it. A prompt pi rebuilt outside `before_agent_start` (a late-registered tool or fresh resource discovery) now leaves enough to see what changed. The throw message also names the divergent offset.
