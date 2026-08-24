@@ -833,7 +833,17 @@ function showStartupNoticeOnce(): void {
 
 // Captures of what pi assembled per agent; see src/prompt-capture.ts for why this
 // is keyed rather than held in a single slot.
-const promptCaptures = new PromptCaptures();
+const promptCaptures = new PromptCaptures(256, (diagnostic) => {
+	const first = diagnostic.matches[0];
+	debug(
+		`prompt-capture: no match for ${diagnostic.systemPrompt.length}-char system prompt. `
+		+ (first
+			? `closest known (${first.key.length}-char) shares its first ${first.firstDivergent} chars and diverges at offset ${first.firstDivergent}: `
+			  + JSON.stringify(diagnostic.systemPrompt.slice(first.firstDivergent - 40, first.firstDivergent + 60))
+			: "no known captures to compare against."
+		) + ` known keys=${diagnostic.matches.length}`,
+	);
+});
 
 /** Whatever a settled session left behind, named in one greppable line.
  *

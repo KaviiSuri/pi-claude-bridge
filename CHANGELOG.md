@@ -2,6 +2,8 @@
 
 ## UNRELEASED
 
+- **Fix: an unresolvable system prompt now logs why** — when the prompt-capture resolver throws, the bridge writes to the debug log the closest known capture and the first offset where the unmatched prompt diverges from it. A prompt pi rebuilt outside `before_agent_start` (a late-registered tool or fresh resource discovery) now leaves enough to see what changed. The throw message also names the divergent offset.
+
 - **Fix: better isolate AskClaude tool (issue #59)** — AskClaude children no longer inherit the user's `~/.claude` `CLAUDE.md` files or skill listing, and now always get Claude Code's system prompt preset instead of only when pi-side skills exist. Thanks @JAtkinsonKO.
 - **Fix: Bogus debug message about "record count mismatch" after switching providers** — the post-rebuild integrity check did not take `@file` expansion into account when switching providers.
 
