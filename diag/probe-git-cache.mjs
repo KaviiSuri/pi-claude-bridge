@@ -8,24 +8,51 @@
 //
 //   node diag/capture-proxy.mjs --port 8787 --out /tmp/gitcache-capture &
 //   node diag/probe-git-cache.mjs /tmp/gitcache-repo
+//   node diag/probe-git-cache.mjs --phase2 /tmp/gitcache-repo
 //   node diag/probe-git-cache.mjs --report /tmp/gitcache-capture
 //
 // Each turn is a fresh one-shot query() with no resume, which is what a bridge
 // turn is: CC re-invoked from scratch. That isolates the system prompt from the
-// ~25% cold-resume finding in diag/AUDIT.md, which would otherwise swamp it.
+// cold-resume finding in diag/AUDIT.md, which would otherwise swamp it.
 //
-// Turn 2 is the control. It changes nothing, so it must read cache; if it does
-// not, something else in the preset churns per invocation and the probe cannot
-// see a git effect at all.
+// Findings, against CC 2.1.141 / SDK 0.2.141:
+//   - The git block is the trailing suffix of system[2], which carries
+//     cache_control ephemeral 1h. CC recomputes it on every invocation.
+//   - Editing a file already listed dirty leaves system[2] byte-identical and
+//     hits cache fully. "Any working-tree edit breaks the cache" is false.
+//   - A status *transition* (new untracked path, git add, new commit) changes
+//     the block and truncates cacheRead back to the tools prefix. Everything
+//     from the system prompt onward is re-written.
+//   - system[0] carries `x-anthropic-billing-header: ... cch=<hex>`, has no
+//     cache_control, changes every request, and is ignored by the cache key.
+//
+// The request must be BRIDGE-SHAPED or the result is an artifact. The prefix is
+// ordered tools -> system[0..2] -> messages, and system[1] is only 62 chars, so
+// with a couple of small tools the first breakpoint falls under the minimum
+// cacheable length and cacheRead can only ever read 0 — which looks like a total
+// miss and hides where the break actually lands. The fat tool set and append
+// below exist to put that breakpoint above the threshold, as a real turn does.
 
 import { execFileSync } from "node:child_process";
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { createSdkMcpServer, query, tool } from "@anthropic-ai/claude-agent-sdk";
+import { z } from "zod";
 
-const PROXY = "http://127.0.0.1:8787";
+const PROXY = process.env.PROBE_PROXY ?? "http://127.0.0.1:8787";
 const MODEL = "claude-haiku-4-5";
 const GIT_ANCHOR = "gitStatus:";
+
+const filler = (n, seed) => Array.from({ length: n },
+	(_, i) => `${seed} clause ${i}: the operand must be a well-formed path relative to the workspace root and is validated before dispatch.`).join(" ");
+
+const PROBE_TOOLS = Array.from({ length: 11 }, (_, i) =>
+	tool(`fat_tool_${i}`, `Tool ${i}. ${filler(40, `t${i}`)}`, {
+		path: z.string().describe(`Path argument. ${filler(6, `p${i}`)}`),
+		mode: z.string().describe(`Mode argument. ${filler(6, `m${i}`)}`),
+	}, async () => ({ content: [{ type: "text", text: "ok" }] })),
+);
+const APPEND = `# Appended agent instructions\n${filler(300, "append")}`;
 
 async function turn(repo, label) {
 	const q = query({
@@ -41,10 +68,19 @@ async function turn(repo, label) {
 				ENABLE_CLAUDEAI_MCP_SERVERS: "0",
 				DISABLE_AUTO_COMPACT: "1",
 			},
-			systemPrompt: { type: "preset", preset: "claude_code" },
+			mcpServers: { probe: createSdkMcpServer({ name: "probe", tools: PROBE_TOOLS }) },
+			systemPrompt: { type: "preset", preset: "claude_code", append: APPEND },
 		},
 	});
-	for await (const message of q) if (message.type === "result") break;
+	// An unreachable proxy still yields a `result`, so a bare break on it reports
+	// success for a turn that never hit the API and captured nothing.
+	for await (const message of q) {
+		if (message.type !== "result") continue;
+		if (message.is_error || message.subtype !== "success") {
+			throw new Error(`turn ${label} failed: ${message.subtype} ${JSON.stringify(message.result ?? "").slice(0, 300)}`);
+		}
+		break;
+	}
 	console.error(`turn ${label}: done`);
 }
 
@@ -80,16 +116,15 @@ async function phase2(repo) {
 	await turn(repo, "8 test (new commit)");
 }
 
-/** The preset's system prompt, as a single string, across all system blocks. */
+/** The system prompt as one string, minus the billing-header block. That block
+ *  changes every request and is provably ignored by the cache key, so including
+ *  it reports a divergence on every pair and hides the real signal. */
 function systemText(request) {
 	const system = request.system;
 	if (typeof system === "string") return system;
-	return (system ?? []).map((block) => block.text ?? "").join("\n");
-}
-
-function gitBlock(text) {
-	const at = text.indexOf(GIT_ANCHOR);
-	return at === -1 ? null : text.slice(at);
+	return (system ?? [])
+		.filter((block) => !(block.text ?? "").startsWith("x-anthropic-billing-header:"))
+		.map((block) => block.text ?? "").join("\n");
 }
 
 /** First byte offset at which two strings differ, or -1 when identical. */
@@ -107,28 +142,35 @@ function report(dir) {
 		.filter((entry) => entry.path.startsWith("/v1/messages") && entry.usage);
 
 	let previous = null;
+	let fullPrefix = 0;
 	for (const entry of index) {
 		const request = JSON.parse(readFileSync(join(dir, `req-${String(entry.n).padStart(4, "0")}.json`), "utf8"));
 		const text = systemText(request);
-		const git = gitBlock(text);
-		const { cacheRead, cacheWrite, input } = entry.usage;
+		const tools = JSON.stringify(request.tools ?? []);
+		const gitAt = text.indexOf(GIT_ANCHOR);
+		const { cacheRead, cacheWrite } = entry.usage;
+		fullPrefix = Math.max(fullPrefix, cacheRead);
 
-		const cached = request.system?.filter?.((b) => b.cache_control).length ?? 0;
-		console.log(`\n#${entry.n}  cacheRead=${cacheRead}  cacheWrite=${cacheWrite}  input=${input}`);
-		console.log(`  system blocks=${Array.isArray(request.system) ? request.system.length : "string"} cache_control on ${cached}`);
-		console.log(`  gitStatus block: ${git ? `present, ${git.length} chars` : "ABSENT"}`);
+		console.log(`\n#${entry.n}  cacheRead=${cacheRead}  cacheWrite=${cacheWrite}  tools=${request.tools?.length ?? 0}`);
+		console.log(`  gitStatus: ${gitAt === -1 ? "ABSENT" : `${text.length - gitAt} chars at byte ${gitAt} of ${text.length}`}`);
 
 		if (previous) {
 			const divergence = firstDivergence(previous.text, text);
-			console.log(`  vs #${previous.n}: system ${divergence === -1 ? "IDENTICAL" : `diverges at byte ${divergence} of ${previous.text.length}`}`);
-			if (divergence !== -1) {
-				const gitAt = text.indexOf(GIT_ANCHOR);
-				console.log(`    gitStatus starts at byte ${gitAt} → divergence is ${divergence >= gitAt ? "INSIDE the git block" : "BEFORE the git block"}`);
+			const changed = divergence !== -1;
+			console.log(`  vs #${previous.n}: system ${changed ? `diverges at byte ${divergence}` : "IDENTICAL"}`
+				+ `, tools ${tools === previous.tools ? "identical" : "CHANGED"}`);
+			if (changed) {
+				console.log(`    divergence is ${divergence >= gitAt ? "INSIDE" : "BEFORE"} the git block`);
 				console.log(`    prev: ${JSON.stringify(previous.text.slice(divergence, divergence + 70))}`);
 				console.log(`    curr: ${JSON.stringify(text.slice(divergence, divergence + 70))}`);
 			}
+			// A system-prompt change truncates the read back to the tools prefix
+			// rather than zeroing it, so `cacheRead > 0` is not evidence of a hit.
+			console.log(`    => ${changed
+				? `BREAK — read truncated to the ${cacheRead}-token tools prefix, re-cached ${cacheWrite}`
+				: `HIT — read ${cacheRead} of the ${fullPrefix}-token prefix`}`);
 		}
-		previous = { n: entry.n, text };
+		previous = { n: entry.n, text, tools };
 	}
 }
 
