@@ -1290,7 +1290,12 @@ async function consumeQuery(
 			logServedContextWindow("result", message, model);
 			resultError = resultErrorText(message);
 			if (resultError !== undefined) {
-				if (queryCtx.rateLimitRejection) resultError = describeRateLimitFailure(queryCtx.rateLimitRejection, resultError);
+				// Consume the rejection alongside the failure it caused, so a later
+				// unrelated failure on this query doesn't inherit the label.
+				if (queryCtx.rateLimitRejection) {
+					resultError = describeRateLimitFailure(queryCtx.rateLimitRejection, resultError);
+					queryCtx.rateLimitRejection = null;
+				}
 				debug(`consumeQuery: error result, subtype=${message.subtype}, error=${resultError}`);
 				if (queryCtx.turnOutput) {
 					queryCtx.turnOutput.stopReason = "error";

@@ -87,6 +87,13 @@ describe("a rate-limited failure", () => {
 		assert.ok(c.turnOutput.errorMessage.includes("five_hour"));
 	});
 
+	it("labels only the failure it caused, not a later one", async () => {
+		const c = makeCtx();
+		await consume(c, [rejection, limitResult, errorResult]);
+
+		assert.strictEqual(c.turnOutput.errorMessage, errorResult.result);
+	});
+
 	it("leaves an unrelated failure alone", async () => {
 		const c = makeCtx();
 		await consume(c, [errorResult]);
