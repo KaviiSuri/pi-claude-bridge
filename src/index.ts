@@ -2160,8 +2160,24 @@ export default function (pi: ExtensionAPI) {
 	g[ACTIVE_STREAM_SIMPLE_KEY] ??= streamClaudeAgentSdk;
 
 	const dispatchStreamSimple = (g[DISPATCH_STREAM_SIMPLE_KEY] ??= ((...args: any[]) => {
-		const active = g[ACTIVE_STREAM_SIMPLE_KEY] ?? [...(g[LIVE_STREAM_SIMPLE_KEY] as Set<any>)].at(-1);
-		if (!active) throw new Error("claude-bridge: no live provider instance");
+		let active = g[ACTIVE_STREAM_SIMPLE_KEY] ?? [...((g[LIVE_STREAM_SIMPLE_KEY] as Set<any> | undefined) ?? [])].at(-1);
+		if (!active) {
+			// Self-heal: a rewind or session_shutdown runs clearSession, which pulls
+			// this instance out of the live set and clears ACTIVE. That is correct for
+			// /reload, where a fresh activate() re-adds the instance right after. But a
+			// host that keeps one long-lived session per thread (bb) can resume the
+			// same session without re-running activate, so nothing re-adds it and the
+			// next turn lands here with an empty live set — even though this module and
+			// its stable, top-level streamClaudeAgentSdk are still loaded. Throwing here
+			// fails the turn and lets the host fall back to another provider (e.g.
+			// commandcode), which then rejects the same model. Re-register the stable
+			// function instead; its per-session state rebuilds on demand.
+			const liveSet: Set<any> = (g[LIVE_STREAM_SIMPLE_KEY] ??= new Set());
+			liveSet.add(streamClaudeAgentSdk);
+			g[ACTIVE_STREAM_SIMPLE_KEY] = streamClaudeAgentSdk;
+			active = streamClaudeAgentSdk;
+			debug("dispatch: live set was empty; re-registered streamClaudeAgentSdk (self-heal)");
+		}
 		return active(...args);
 	}));
 
