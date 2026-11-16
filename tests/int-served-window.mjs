@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { createRpcHarness } from "./lib/rpc-harness.mjs";
 
 const TIMEOUT = 120_000;
-const BRIDGE_MODEL = "claude-bridge/claude-haiku-4-5";
+const BRIDGE_MODEL = "claude-bridge/claude-haiku-5-5";
 
 const testAgentDir = mkdtempSync(join(tmpdir(), "served-window-agent-"));
 writeFileSync(join(testAgentDir, "settings.json"), JSON.stringify({}));
@@ -23,10 +23,9 @@ const harness = createRpcHarness({
 	defaultTimeout: TIMEOUT,
 });
 
-const { start, stop, promptAndWait, DEBUG_LOG, RPC_LOG } = harness;
+const { startAndWait, stop, promptAndWait, DEBUG_LOG, RPC_LOG } = harness;
 
-start();
-await new Promise((r) => setTimeout(r, 2000));
+await startAndWait();
 
 try {
 	console.log("Single bridge prompt to exercise the provider result path...");
